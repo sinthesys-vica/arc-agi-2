@@ -76,6 +76,18 @@ class DSLTests(unittest.TestCase):
         actual = transform(np.array([[0, 1]]))
         np.testing.assert_array_equal(actual, [[1, 0, 1, 0]])
 
+    def test_no_op_programs_have_identity_signature(self) -> None:
+        identity_signature = dsl.signature(dsl.identity)
+        self.assertEqual(dsl.signature(dsl.tile(1, 1)), identity_signature)
+        self.assertEqual(dsl.signature(dsl.scale(1, 1)), identity_signature)
+        self.assertEqual(dsl.signature(dsl.rotate(0)), identity_signature)
+        self.assertIs(dsl.compose(dsl.identity, dsl.tile(1, 1)), dsl.identity)
+
+        recolor = dsl.recolor({1: 2})
+        decorated = dsl.compose(recolor, dsl.scale(1, 1), dsl.rotate(0))
+        self.assertIs(decorated, recolor)
+        self.assertEqual(dsl.signature(decorated), dsl.signature(recolor))
+
     def test_crop_uses_inferred_nonzero_background(self) -> None:
         actual = dsl.crop_non_background(np.array([
             [4, 4, 4, 4],

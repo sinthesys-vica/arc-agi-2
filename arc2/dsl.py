@@ -19,6 +19,13 @@ from .scene import Scene
 
 Transform = Callable[[np.ndarray], np.ndarray]
 
+_IDENTITY_SIGNATURE = ("identity",)
+_IDENTITY_EQUIVALENTS = frozenset({
+    ("tile", 1, 1),
+    ("scale", 1, 1),
+    ("rotate", 0),
+})
+
 
 def _grid(value: np.ndarray | list[list[int]]) -> np.ndarray:
     arr = np.asarray(value, dtype=int)
@@ -34,12 +41,32 @@ def _decorate(transform: Transform, name: str, *params: Any) -> Transform:
     return transform
 
 
+def _canonical_signature(stored: tuple) -> tuple:
+    """Return the semantic normal form of a stored program signature."""
+
+    if stored == _IDENTITY_SIGNATURE or stored in _IDENTITY_EQUIVALENTS:
+        return _IDENTITY_SIGNATURE
+    if stored and stored[0] == "compose":
+        components = tuple(
+            _canonical_signature(tuple(component)) for component in stored[1:]
+        )
+        components = tuple(
+            component for component in components if component != _IDENTITY_SIGNATURE
+        )
+        if not components:
+            return _IDENTITY_SIGNATURE
+        if len(components) == 1:
+            return components[0]
+        return ("compose", *components)
+    return stored
+
+
 def signature(transform: Transform) -> tuple:
-    """Return a stable structural signature for a transform."""
+    """Return a stable, semantically canonical program signature."""
 
     stored = getattr(transform, "_arc2_signature", None)
     if stored is not None:
-        return tuple(stored)
+        return _canonical_signature(tuple(stored))
     return (getattr(transform, "__qualname__", repr(transform)),)
 
 
@@ -55,8 +82,15 @@ _decorate(identity, "identity")
 def compose(*transforms: Transform) -> Transform:
     """Compose transforms left-to-right: ``compose(f, g)(x) = g(f(x))``."""
 
+    transforms = tuple(
+        transform
+        for transform in transforms
+        if signature(transform) != _IDENTITY_SIGNATURE
+    )
     if not transforms:
         return identity
+    if len(transforms) == 1:
+        return transforms[0]
 
     def composed(grid: np.ndarray) -> np.ndarray:
         result = _grid(grid)
