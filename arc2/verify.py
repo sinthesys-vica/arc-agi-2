@@ -109,15 +109,20 @@ def structural_distance(h1: Hypothesis, h2: Hypothesis) -> float:
     the programs differ — and the structural diversity is what matters for
     the second attempt. The norm here is program-level:
 
-    * description tokens (Jaccard distance), and
-    * if both transforms are dsl.compose() closures, the identity of their
-      component transforms (Jaccard distance over component ids).
+    * the program norm is PRIMARY: if both transforms are dsl.compose()
+      closures, the distance is the Jaccard distance over their component
+      transform identities;
+    * otherwise (not introspectable), the description tokens serve as the
+      fallback norm (Jaccard distance).
 
-    The larger distance wins; 0 = structurally identical, 1 = disjoint.
+    0 = structurally identical, 1 = disjoint. Program identity beats wording:
+    two identical programs with differently-worded descriptions are still
+    distance 0.
     """
-    d_desc = _token_jaccard_distance(h1.description, h2.description)
     d_prog = _program_jaccard_distance(h1.transform, h2.transform)
-    return max(d_desc, d_prog)
+    if d_prog is not None:
+        return d_prog
+    return _token_jaccard_distance(h1.description, h2.description)
 
 
 def _token_jaccard_distance(a: str, b: str) -> float:
@@ -128,12 +133,16 @@ def _token_jaccard_distance(a: str, b: str) -> float:
     return 1.0 - len(ta & tb) / len(ta | tb)
 
 
-def _program_jaccard_distance(f1, f2) -> float:
-    """Jaccard distance over component transform ids for compose() closures."""
+def _program_jaccard_distance(f1, f2) -> float | None:
+    """Jaccard distance over component transform ids for compose() closures.
+
+    Returns None when either side is not introspectable — the caller then
+    falls back to the description norm.
+    """
     c1 = _compose_components(f1)
     c2 = _compose_components(f2)
     if c1 is None or c2 is None:
-        return 0.0  # not introspectable — fall back to description norm
+        return None  # not introspectable — caller falls back to description
     s1 = {id(c) for c in c1}
     s2 = {id(c) for c in c2}
     if not s1 and not s2:
@@ -361,6 +370,11 @@ def _self_test() -> None:
     d_comp = structural_distance(
         Hypothesis(compose(identity), "a"), Hypothesis(compose(rot180), "b"))
     assert d_comp == 1.0, d_comp
+    # same program, differently-worded descriptions -> program norm wins -> 0
+    d_same_prog = structural_distance(
+        Hypothesis(compose(identity), "identity transform"),
+        Hypothesis(compose(identity), "do absolutely nothing at all"))
+    assert d_same_prog == 0.0, d_same_prog
 
     print("verify.py self-tests: ALL PASS")
 
