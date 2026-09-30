@@ -151,7 +151,14 @@ def _program_jaccard_distance(f1, f2) -> float | None:
 
 
 def _compose_components(f) -> tuple | None:
-    """Extract the component tuple of a dsl.compose() closure, if possible."""
+    """Extract component transforms of a dsl.compose() function.
+
+    Prefers the explicit ``_arc2_components`` attribute set by dsl.compose();
+    falls back to closure scanning for plain closures built elsewhere.
+    """
+    explicit = getattr(f, "_arc2_components", None)
+    if isinstance(explicit, tuple) and explicit and all(callable(x) for x in explicit):
+        return explicit
     closure = getattr(f, "__closure__", None)
     if not closure:
         return None
