@@ -1,22 +1,36 @@
-"""Hypothesis proposers — generate candidate transforms from scene + DSL.
+"""Relation-driven hypothesis proposers built from the Atlas DSL.
 
 Owner: Atlas
+
+These proposers intentionally cover only compact, reusable rule families.
+Every emitted candidate is deterministic; the verifier remains responsible
+for accepting only exact fits across every training pair.
 """
 
 from __future__ import annotations
 
-from typing import Any
-from .scene import Scene
+from dataclasses import dataclass
+
+import numpy as np
+
+from . import dsl
 from .dsl import Transform
+from .scene import Scene
 
 
+@dataclass(frozen=True, slots=True)
 class Hypothesis:
-    """A candidate transformation hypothesis."""
+    """A candidate program plus search metadata."""
 
-    def __init__(self, transform: Transform, description: str, confidence: float = 0.0):
-        self.transform = transform
-        self.description = description
-        self.confidence = confidence
+    transform: Transform
+    description: str
+    confidence: float = 0.0
+    complexity: int = 1
+    proposer: str = "unknown"
+
+    @property
+    def program_signature(self) -> tuple:
+        return dsl.signature(self.transform)
 
     def __repr__(self) -> str:
         return f"Hypothesis({self.description}, conf={self.confidence:.2f})"
@@ -25,31 +39,198 @@ class Hypothesis:
 class Proposer:
     """Base class for hypothesis proposers.
 
-    The `tier` attribute controls search order (see search.ProposerTier):
-        0 = fast (single primitives)
-        1 = medium (object-based)
-        2 = deep (compositional)
-        3 = exotic (structural)
+    ``tier`` follows ``search.ProposerTier``: 0 fast, 1 medium, 2 deep,
+    3 exotic.
     """
 
-    tier: int = 1  # default: medium
+    tier: int = 1
 
     def propose(
         self,
         inputs: list[Scene],
         outputs: list[Scene] | None = None,
     ) -> list[Hypothesis]:
-        """Generate hypotheses from training examples.
-
-        Args:
-            inputs: input scenes from training pairs
-            outputs: output scenes (optional) — enables relation-driven
-                     proposing (color maps, size ratios, structural diffs)
-
-        Returns:
-            list of candidate hypotheses
-        """
-        raise NotImplementedError("Atlas: implement proposer")
+        raise NotImplementedError
 
 
-# --- Atlas: add concrete proposers below ---
+def _paired(inputs: list[Scene], outputs: list[Scene] | None) -> bool:
+    return outputs is not None and bool(inputs) and len(inputs) == len(outputs)
+
+
+def _exact(transform: Transform, inputs: list[Scene], outputs: list[Scene]) -> bool:
+    try:
+        return all(
+            np.array_equal(transform(source.grid), target.grid)
+            for source, target in zip(inputs, outputs)
+        )
+    except Exception:
+        return False
+
+
+def _infer_recolor(
+    source_grids: list[np.ndarray],
+    outputs: list[Scene],
+) -> dict[int, int] | None:
+    """Infer one position-wise color map shared by every training pair."""
+
+    mapping: dict[int, int] = {}
+    for source, output in zip(source_grids, outputs):
+        if source.shape != output.grid.shape:
+            return None
+        for old, new in zip(source.flat, output.grid.flat):
+            old_i, new_i = int(old), int(new)
+            previous = mapping.setdefault(old_i, new_i)
+            if previous != new_i:
+                return None
+    return mapping
+
+
+def _deduplicate(hypotheses: list[Hypothesis]) -> list[Hypothesis]:
+    result: list[Hypothesis] = []
+    seen: set[tuple] = set()
+    for hypothesis in hypotheses:
+        key = hypothesis.program_signature
+        if key not in seen:
+            seen.add(key)
+            result.append(hypothesis)
+    return result
+
+
+class GeometricProposer(Proposer):
+    """Enumerate single-step D4 symmetries."""
+
+    tier = 0
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        candidates = [
+            Hypothesis(transform, name.replace("_", " "), 0.96, 1, "geometric")
+            for name, transform in dsl.d4_transforms().items()
+        ]
+        if _paired(inputs, outputs):
+            assert outputs is not None
+            candidates = [h for h in candidates if _exact(h.transform, inputs, outputs)]
+        return _deduplicate(candidates)
+
+
+class ColorMapProposer(Proposer):
+    """Infer a global recolor, optionally after a D4 transform."""
+
+    tier = 0
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+        candidates: list[Hypothesis] = []
+        for name, base in dsl.d4_transforms().items():
+            try:
+                transformed = [base(scene.grid) for scene in inputs]
+            except Exception:
+                continue
+            mapping = _infer_recolor(transformed, outputs)
+            if mapping is None:
+                continue
+            recolor = dsl.recolor(mapping)
+            transform = recolor if name == "identity" else dsl.compose(base, recolor)
+            mapping_text = ", ".join(f"{old}->{new}" for old, new in sorted(mapping.items()))
+            description = f"recolor {mapping_text}"
+            if name != "identity":
+                description = f"{name.replace('_', ' ')} then {description}"
+            complexity = 1 if name == "identity" else 2
+            candidate = Hypothesis(transform, description, 0.94, complexity, "color-map")
+            if _exact(candidate.transform, inputs, outputs):
+                candidates.append(candidate)
+        return _deduplicate(candidates)
+
+
+class ResizeProposer(Proposer):
+    """Infer integer tiling or nearest-neighbor scaling, with recoloring."""
+
+    tier = 0
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+
+        factors: tuple[int, int] | None = None
+        for source, target in zip(inputs, outputs):
+            if target.height % source.height or target.width % source.width:
+                return []
+            current = (target.height // source.height, target.width // source.width)
+            if current[0] < 1 or current[1] < 1:
+                return []
+            if factors is None:
+                factors = current
+            elif factors != current:
+                return []
+        assert factors is not None
+
+        candidates: list[Hypothesis] = []
+        for name, base in (
+            ("tile", dsl.tile(*factors)),
+            ("scale", dsl.scale(*factors)),
+        ):
+            description = f"{name} {factors[0]}x{factors[1]}"
+            direct = Hypothesis(base, description, 0.92, 1, "resize")
+            if _exact(base, inputs, outputs):
+                candidates.append(direct)
+
+            resized = [base(scene.grid) for scene in inputs]
+            mapping = _infer_recolor(resized, outputs)
+            if mapping is None or all(old == new for old, new in mapping.items()):
+                continue
+            recolor = dsl.recolor(mapping)
+            combined = dsl.compose(recolor, base)
+            mapping_text = ", ".join(f"{old}->{new}" for old, new in sorted(mapping.items()))
+            candidate = Hypothesis(
+                combined,
+                f"recolor {mapping_text} then {description}",
+                0.90,
+                2,
+                "resize",
+            )
+            if _exact(combined, inputs, outputs):
+                candidates.append(candidate)
+        return _deduplicate(candidates)
+
+
+class CropProposer(Proposer):
+    """Crop to the inferred foreground bounding box."""
+
+    tier = 0
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        candidate = Hypothesis(
+            dsl.crop_non_background,
+            "crop non-background bounding box",
+            0.90,
+            1,
+            "crop",
+        )
+        if _paired(inputs, outputs):
+            assert outputs is not None
+            return [candidate] if _exact(candidate.transform, inputs, outputs) else []
+        return [candidate]
+
+
+def default_proposers() -> list[Proposer]:
+    """Return the deterministic baseline proposer set in search order."""
+
+    return [GeometricProposer(), ColorMapProposer(), ResizeProposer(), CropProposer()]
