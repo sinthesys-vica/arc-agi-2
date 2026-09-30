@@ -316,6 +316,114 @@ class RoutedRibbonProposer(Proposer):
         return _deduplicate(candidates)
 
 
+class NestedRectangleProposer(Proposer):
+    """Compress nested rectangular regions into a miniature ring diagram."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        transform = dsl.nested_rectangle_miniature()
+        candidate = Hypothesis(
+            transform,
+            "compress nested rectangles to one-cell rings",
+            0.78,
+            3,
+            "nested-rectangle",
+        )
+        if _paired(inputs, outputs):
+            assert outputs is not None
+            return [candidate] if _exact(transform, inputs, outputs) else []
+        return [candidate]
+
+
+class D4OrbitProposer(Proposer):
+    """Fill a masked color by consensus over each dihedral orbit."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        colors = sorted({color for scene in inputs for color in scene.colors})
+        candidates: list[Hypothesis] = []
+        for hole_color in colors:
+            transform = dsl.d4_orbit_consensus(hole_color)
+            candidate = Hypothesis(
+                transform,
+                f"fill color {hole_color} by D4 orbit consensus",
+                0.76,
+                3,
+                "d4-orbit",
+            )
+            if not _paired(inputs, outputs):
+                candidates.append(candidate)
+            elif outputs is not None and _exact(transform, inputs, outputs):
+                candidates.append(candidate)
+        return _deduplicate(candidates)
+
+
+class FractalProposer(Proposer):
+    """Reconstruct a self-similar motif lattice and mark each copy."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        colors = (
+            sorted({color for scene in outputs for color in scene.colors})
+            if outputs is not None
+            else list(range(10))
+        )
+        candidates: list[Hypothesis] = []
+        for marker_color in colors:
+            transform = dsl.self_similar_stamp(marker_color)
+            candidate = Hypothesis(
+                transform,
+                f"self-similar motif lattice marked with color {marker_color}",
+                0.74,
+                4,
+                "fractal",
+            )
+            if not _paired(inputs, outputs):
+                candidates.append(candidate)
+            elif outputs is not None and _exact(transform, inputs, outputs):
+                candidates.append(candidate)
+        return _deduplicate(candidates)
+
+
+class AnalogyProposer(Proposer):
+    """Infer local A-to-B rules and apply them to neighboring C blocks."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        transform = dsl.block_analogy()
+        candidate = Hypothesis(
+            transform,
+            "apply demonstrated block analogies",
+            0.72,
+            4,
+            "analogy",
+        )
+        if _paired(inputs, outputs):
+            assert outputs is not None
+            return [candidate] if _exact(transform, inputs, outputs) else []
+        return [candidate]
+
+
 def default_proposers() -> list[Proposer]:
     """Return the deterministic baseline proposer set in search order."""
 
@@ -326,4 +434,8 @@ def default_proposers() -> list[Proposer]:
         CropProposer(),
         LargestComponentProposer(),
         RoutedRibbonProposer(),
+        NestedRectangleProposer(),
+        D4OrbitProposer(),
+        FractalProposer(),
+        AnalogyProposer(),
     ]

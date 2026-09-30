@@ -8,9 +8,13 @@ import numpy as np
 
 from arc2 import dsl
 from arc2.proposers import (
+    AnalogyProposer,
     ColorMapProposer,
+    D4OrbitProposer,
+    FractalProposer,
     GeometricProposer,
     LargestComponentProposer,
+    NestedRectangleProposer,
     ResizeProposer,
     RoutedRibbonProposer,
     default_proposers,
@@ -106,6 +110,70 @@ class DSLTests(unittest.TestCase):
             [0, 2, 0, 0, 0, 0, 0],
         ])
 
+    def test_nested_rectangle_miniature_preserves_repeated_colors(self) -> None:
+        actual = dsl.nested_rectangle_miniature()(np.array([
+            [2, 2, 2, 2, 2],
+            [2, 1, 1, 1, 2],
+            [2, 1, 2, 1, 2],
+            [2, 1, 1, 1, 2],
+            [2, 2, 2, 2, 2],
+        ]))
+        np.testing.assert_array_equal(actual, [
+            [2, 2, 2, 2, 2],
+            [2, 1, 1, 1, 2],
+            [2, 1, 2, 1, 2],
+            [2, 1, 1, 1, 2],
+            [2, 2, 2, 2, 2],
+        ])
+
+    def test_d4_orbit_consensus_fills_mask(self) -> None:
+        source = np.array([
+            [1, 2, 2, 1],
+            [3, 4, 3, 3],
+            [3, 3, 4, 3],
+            [1, 2, 2, 1],
+        ])
+        actual = dsl.d4_orbit_consensus(4)(source)
+        np.testing.assert_array_equal(actual, [
+            [1, 2, 2, 1],
+            [3, 3, 3, 3],
+            [3, 3, 3, 3],
+            [1, 2, 2, 1],
+        ])
+
+    def test_self_similar_stamp_restores_occluded_copy(self) -> None:
+        source = np.array([
+            [2, 2, 0, 2, 2],
+            [2, 0, 0, 2, 0],
+            [0, 0, 0, 0, 0],
+            [2, 2, 0, 3, 3],
+            [2, 0, 0, 3, 3],
+        ])
+        expected = np.array([
+            [8, 2, 0, 2, 8],
+            [2, 0, 0, 2, 0],
+            [0, 0, 0, 0, 0],
+            [2, 2, 0, 0, 0],
+            [8, 0, 0, 0, 0],
+        ])
+        np.testing.assert_array_equal(dsl.self_similar_stamp(8)(source), expected)
+
+    def test_block_analogy_applies_geometry_and_color_map(self) -> None:
+        source = np.array([
+            [2, 4, 0, 4, 2, 0, 0, 8, 6],
+            [4, 4, 0, 4, 4, 0, 0, 8, 8],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [3, 7, 0, 8, 3, 0, 0, 3, 3],
+            [3, 3, 0, 8, 8, 0, 0, 3, 7],
+        ])
+        np.testing.assert_array_equal(dsl.block_analogy()(source), [
+            [6, 8],
+            [8, 8],
+            [0, 0],
+            [8, 8],
+            [8, 3],
+        ])
+
 
 class ProposerTests(unittest.TestCase):
     @staticmethod
@@ -159,6 +227,40 @@ class ProposerTests(unittest.TestCase):
         target = Scene(dsl.routed_ribbon(2, -1, 1, 2)(source.grid))
         proposals = RoutedRibbonProposer().propose([source], [target])
         self.assertTrue(any("direction -1,1 width 2" in h.description for h in proposals))
+
+    def test_structural_proposer_family(self) -> None:
+        nested = Scene([
+            [2, 2, 2],
+            [2, 1, 2],
+            [2, 2, 2],
+        ])
+        self.assertTrue(NestedRectangleProposer().propose([nested], [nested]))
+
+        orbit_input = Scene([
+            [1, 2, 2, 1],
+            [3, 4, 3, 3],
+            [3, 3, 4, 3],
+            [1, 2, 2, 1],
+        ])
+        orbit_output = Scene(dsl.d4_orbit_consensus(4)(orbit_input.grid))
+        self.assertTrue(D4OrbitProposer().propose([orbit_input], [orbit_output]))
+
+        analogy_input = Scene([
+            [2, 4, 0, 4, 2, 0, 0, 8, 6],
+            [4, 4, 0, 4, 4, 0, 0, 8, 8],
+        ])
+        analogy_output = Scene([[6, 8], [8, 8]])
+        self.assertTrue(AnalogyProposer().propose([analogy_input], [analogy_output]))
+
+        fractal_input = Scene([
+            [2, 2, 0, 2, 2],
+            [2, 0, 0, 2, 0],
+            [0, 0, 0, 0, 0],
+            [2, 2, 0, 3, 3],
+            [2, 0, 0, 3, 3],
+        ])
+        fractal_output = Scene(dsl.self_similar_stamp(8)(fractal_input.grid))
+        self.assertTrue(FractalProposer().propose([fractal_input], [fractal_output]))
 
     def test_default_proposers_integrate_with_search(self) -> None:
         train = [{

@@ -8,6 +8,7 @@ program signature so search can deduplicate candidates without descriptions.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -322,3 +323,231 @@ def routed_ribbon(
         width,
         background,
     )
+
+
+def nested_rectangle_miniature() -> Transform:
+    """Compress nested rectangular regions to one-cell-thick rings.
+
+    Repeated colors are deliberately preserved when they occur at distinct
+    nesting depths.  The output for ``n`` levels is ``(2n - 1)`` square.
+    """
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        palette = Scene(_grid(grid)).nested_rectangular_palette()
+        size = 2 * len(palette) - 1
+        result = np.full((size, size), palette[-1], dtype=int)
+        for depth, color in enumerate(palette):
+            result[depth:size - depth, depth:size - depth] = color
+        return result
+
+    return _decorate(transform, "nested_rectangle_miniature")
+
+
+def d4_orbit_consensus(hole_color: int) -> Transform:
+    """Fill masked cells from the unique modal color in their D4 orbit."""
+
+    if hole_color not in range(10):
+        raise ValueError("hole color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        if source.shape[0] != source.shape[1]:
+            raise ValueError("D4 orbit consensus requires a square grid")
+        size = source.shape[0]
+        result = source.copy()
+        holes = np.argwhere(source == hole_color)
+        for row_value, column_value in holes:
+            row, column = int(row_value), int(column_value)
+            orbit = {
+                (row, column),
+                (row, size - 1 - column),
+                (size - 1 - row, column),
+                (size - 1 - row, size - 1 - column),
+                (column, row),
+                (column, size - 1 - row),
+                (size - 1 - column, row),
+                (size - 1 - column, size - 1 - row),
+            }
+            counts = Counter(
+                int(source[rr, cc])
+                for rr, cc in orbit
+                if int(source[rr, cc]) != hole_color
+            )
+            if not counts:
+                raise ValueError("D4 orbit contains no observed color")
+            best_count = max(counts.values())
+            winners = [color for color, count in counts.items() if count == best_count]
+            if len(winners) != 1:
+                raise ValueError("D4 orbit consensus is ambiguous")
+            result[row, column] = winners[0]
+        return result
+
+    return _decorate(transform, "d4_orbit_consensus", hole_color)
+
+
+def self_similar_stamp(marker_color: int, background: int | None = None) -> Transform:
+    """Reconstruct a grid of repeated motifs from the motif's own mask.
+
+    A square motif is repeated on a square lattice.  Full-background lines on
+    one axis expose the lattice stride; opaque distractor blocks on the other
+    axis may hide repetitions.  The motif's non-background mask determines
+    which lattice cells exist, and each restored copy receives ``marker_color``
+    at the local coordinate matching its lattice coordinate.
+    """
+
+    if marker_color not in range(10):
+        raise ValueError("marker color must be in [0, 9]")
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        if source.shape[0] != source.shape[1]:
+            raise ValueError("self-similar stamping requires a square grid")
+        bg = Scene(source).background_color() if background is None else background
+        separator_rows = [
+            index for index, row in enumerate(source) if np.all(row == bg)
+        ]
+        separator_cols = [
+            index for index, column in enumerate(source.T) if np.all(column == bg)
+        ]
+        separators = separator_rows or separator_cols
+        if not separators or separators[0] < 1:
+            raise ValueError("no full-background lattice separator found")
+
+        block_size = separators[0]
+        stride = block_size + 1
+        size = source.shape[0]
+        if (size + 1) % stride:
+            raise ValueError("grid does not fit a regular motif lattice")
+        lattice_size = (size + 1) // stride
+        expected_separators = [stride * index - 1 for index in range(1, lattice_size)]
+        if separators != expected_separators or lattice_size != block_size:
+            raise ValueError("motif and lattice dimensions do not agree")
+
+        blocks: list[np.ndarray] = []
+        for grid_row in range(lattice_size):
+            for grid_column in range(lattice_size):
+                row0, column0 = grid_row * stride, grid_column * stride
+                block = source[
+                    row0:row0 + block_size,
+                    column0:column0 + block_size,
+                ]
+                values = set(int(value) for value in np.unique(block))
+                if any(value != bg for value in values) and len(values) > 1:
+                    blocks.append(block)
+        if not blocks:
+            raise ValueError("no non-uniform motif block found")
+
+        frequencies = Counter(tuple(int(value) for value in block.flat) for block in blocks)
+        motif_key, frequency = frequencies.most_common(1)[0]
+        if list(frequencies.values()).count(frequency) != 1:
+            raise ValueError("motif selection is ambiguous")
+        motif = np.asarray(motif_key, dtype=int).reshape(block_size, block_size)
+
+        result = np.full(source.shape, bg, dtype=int)
+        for grid_row in range(lattice_size):
+            for grid_column in range(lattice_size):
+                if int(motif[grid_row, grid_column]) == bg:
+                    continue
+                row0, column0 = grid_row * stride, grid_column * stride
+                result[
+                    row0:row0 + block_size,
+                    column0:column0 + block_size,
+                ] = motif
+                result[row0 + grid_row, column0 + grid_column] = marker_color
+        return result
+
+    return _decorate(transform, "self_similar_stamp", marker_color, background)
+
+
+def block_analogy(background: int | None = None) -> Transform:
+    """Apply each demonstrated A-to-B block rule to its neighboring C block.
+
+    Full-background columns delimit three equal block columns (A, B, C), and
+    full-background rows delimit independent examples.  A-to-B is inferred as
+    a D4 transform when possible, otherwise as a position-wise color map.
+    """
+
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    priority = (
+        "flip_lr",
+        "rotate_270",
+        "rotate_90",
+        "flip_ud",
+        "rotate_180",
+        "identity",
+        "transpose",
+        "anti_transpose",
+    )
+
+    def runs(indices: list[int]) -> list[tuple[int, int]]:
+        if not indices:
+            return []
+        result: list[tuple[int, int]] = []
+        start = previous = indices[0]
+        for index in indices[1:]:
+            if index != previous + 1:
+                result.append((start, previous + 1))
+                start = index
+            previous = index
+        result.append((start, previous + 1))
+        return result
+
+    def infer_and_apply(source: np.ndarray, target: np.ndarray, query: np.ndarray) -> np.ndarray:
+        d4 = d4_transforms()
+        matching = [
+            name for name in priority
+            if d4[name](source).shape == target.shape
+            and np.array_equal(d4[name](source), target)
+        ]
+        if matching:
+            return d4[matching[0]](query)
+
+        mapping: dict[int, int] = {}
+        if source.shape != target.shape:
+            raise ValueError("analogy color map requires equal demonstration shapes")
+        for old, new in zip(source.flat, target.flat):
+            old_i, new_i = int(old), int(new)
+            previous = mapping.setdefault(old_i, new_i)
+            if previous != new_i:
+                raise ValueError("analogy color map is inconsistent")
+        if any(int(value) not in mapping for value in query.flat):
+            raise ValueError("analogy query contains an unmapped color")
+        return recolor(mapping)(query)
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = Scene(source).background_color() if background is None else background
+        active_columns = [
+            index for index, column in enumerate(source.T) if not np.all(column == bg)
+        ]
+        column_runs = runs(active_columns)
+        if len(column_runs) != 3:
+            raise ValueError("block analogy requires exactly three block columns")
+        widths = {end - start for start, end in column_runs}
+        if len(widths) != 1:
+            raise ValueError("analogy block columns must have equal width")
+        output_width = widths.pop()
+
+        result_rows: list[np.ndarray] = []
+        row = 0
+        while row < source.shape[0]:
+            if np.all(source[row] == bg):
+                result_rows.append(np.full(output_width, bg, dtype=int))
+                row += 1
+                continue
+            end_row = row
+            while end_row < source.shape[0] and not np.all(source[end_row] == bg):
+                end_row += 1
+            blocks = [source[row:end_row, start:end] for start, end in column_runs]
+            answer = infer_and_apply(blocks[0], blocks[1], blocks[2])
+            if answer.shape != (end_row - row, output_width):
+                raise ValueError("analogy answer shape differs from its demonstration block")
+            result_rows.extend(answer)
+            row = end_row
+        return np.vstack(result_rows)
+
+    return _decorate(transform, "block_analogy", background)
