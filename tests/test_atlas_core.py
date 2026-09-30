@@ -15,6 +15,11 @@ from arc2.proposers import (
     GeometricProposer,
     LargestComponentProposer,
     NestedRectangleProposer,
+    FramedObjectProposer,
+    PartitionAnchorRelocateProposer,
+    PartitionBlueprintProposer,
+    PartitionMarkerRouteProposer,
+    PartitionMaxCountProposer,
     ResizeProposer,
     RoutedRibbonProposer,
     default_proposers,
@@ -186,6 +191,49 @@ class DSLTests(unittest.TestCase):
             [8, 3],
         ])
 
+    def test_partition_max_count_fill_preserves_separators(self) -> None:
+        source = np.array([
+            [2, 0, 5, 0, 0],
+            [2, 0, 5, 0, 2],
+            [5, 5, 5, 5, 5],
+            [0, 0, 5, 2, 2],
+            [0, 0, 5, 2, 0],
+        ])
+        np.testing.assert_array_equal(dsl.partition_max_count_fill()(source), [
+            [0, 0, 5, 0, 0],
+            [0, 0, 5, 0, 0],
+            [5, 5, 5, 5, 5],
+            [0, 0, 5, 2, 2],
+            [0, 0, 5, 2, 2],
+        ])
+
+    def test_background_gaps_are_not_partition_separators(self) -> None:
+        source = np.array([
+            [8, 8, 8, 8, 8],
+            [8, 6, 6, 6, 8],
+            [8, 6, 8, 6, 8],
+            [8, 6, 6, 6, 8],
+            [8, 8, 8, 8, 8],
+        ])
+        with self.assertRaises(ValueError):
+            dsl.partition_max_count_fill()(source)
+
+    def test_frame_and_fill_objects(self) -> None:
+        source = np.array([
+            [8, 8, 8, 8, 8, 8, 8],
+            [8, 8, 6, 6, 6, 8, 8],
+            [8, 8, 6, 8, 6, 8, 8],
+            [8, 8, 6, 6, 6, 8, 8],
+            [8, 8, 8, 8, 8, 8, 8],
+        ])
+        np.testing.assert_array_equal(dsl.frame_and_fill_objects(6, 3, 4)(source), [
+            [8, 3, 3, 3, 3, 3, 8],
+            [8, 3, 6, 6, 6, 3, 8],
+            [8, 3, 6, 4, 6, 3, 8],
+            [8, 3, 6, 6, 6, 3, 8],
+            [8, 3, 3, 3, 3, 3, 8],
+        ])
+
 
 class ProposerTests(unittest.TestCase):
     @staticmethod
@@ -273,6 +321,33 @@ class ProposerTests(unittest.TestCase):
         ])
         fractal_output = Scene(dsl.self_similar_stamp(8)(fractal_input.grid))
         self.assertTrue(FractalProposer().propose([fractal_input], [fractal_output]))
+
+        partition_input = Scene([
+            [2, 0, 5, 0, 0],
+            [2, 0, 5, 0, 2],
+            [5, 5, 5, 5, 5],
+            [0, 0, 5, 2, 2],
+            [0, 0, 5, 2, 0],
+        ])
+        partition_output = Scene(dsl.partition_max_count_fill()(partition_input.grid))
+        self.assertTrue(
+            PartitionMaxCountProposer().propose([partition_input], [partition_output])
+        )
+
+        framed_input = Scene([
+            [8, 8, 8, 8, 8, 8, 8],
+            [8, 8, 6, 6, 6, 8, 8],
+            [8, 8, 6, 8, 6, 8, 8],
+            [8, 8, 6, 6, 6, 8, 8],
+            [8, 8, 8, 8, 8, 8, 8],
+        ])
+        framed_output = Scene(dsl.frame_and_fill_objects(6, 3, 4)(framed_input.grid))
+        self.assertTrue(FramedObjectProposer().propose([framed_input], [framed_output]))
+
+        defaults = default_proposers()
+        self.assertTrue(any(isinstance(p, PartitionBlueprintProposer) for p in defaults))
+        self.assertTrue(any(isinstance(p, PartitionMarkerRouteProposer) for p in defaults))
+        self.assertTrue(any(isinstance(p, PartitionAnchorRelocateProposer) for p in defaults))
 
     def test_default_proposers_integrate_with_search(self) -> None:
         train = [{

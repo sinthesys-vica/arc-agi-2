@@ -585,3 +585,408 @@ def block_analogy(background: int | None = None) -> Transform:
         return np.vstack(result_rows)
 
     return _decorate(transform, "block_analogy", background)
+
+
+def _active_runs(size: int, separators: tuple[int, ...]) -> tuple[tuple[int, int], ...]:
+    """Return half-open non-separator spans along one axis."""
+
+    separator_set = set(separators)
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for index in range(size):
+        if index in separator_set:
+            if start is not None:
+                runs.append((start, index))
+                start = None
+        elif start is None:
+            start = index
+    if start is not None:
+        runs.append((start, size))
+    return tuple(runs)
+
+
+def _regular_partition(
+    grid: np.ndarray,
+) -> tuple[int, int, tuple[tuple[int, int], ...], tuple[tuple[int, int], ...], tuple[int, ...], tuple[int, ...]]:
+    """Detect a strict rectangular partition made of non-background lines.
+
+    The detector deliberately fails closed.  All separator rows and columns
+    must have one shared color, that color may not occur in content cells, and
+    the resulting spans must be regular on each split axis.  Background-only
+    gaps therefore do not masquerade as separators.
+    """
+
+    source = _grid(grid)
+    uniform_rows = [
+        (index, int(row[0]))
+        for index, row in enumerate(source)
+        if np.all(row == row[0])
+    ]
+    uniform_cols = [
+        (index, int(column[0]))
+        for index, column in enumerate(source.T)
+        if np.all(column == column[0])
+    ]
+    colors = {color for _, color in (*uniform_rows, *uniform_cols)}
+    candidates = []
+    for separator_color in sorted(colors):
+        rows = tuple(index for index, color in uniform_rows if color == separator_color)
+        columns = tuple(index for index, color in uniform_cols if color == separator_color)
+        if any(index in {0, source.shape[0] - 1} for index in rows):
+            continue
+        if any(index in {0, source.shape[1] - 1} for index in columns):
+            continue
+
+        row_spans = _active_runs(source.shape[0], rows)
+        column_spans = _active_runs(source.shape[1], columns)
+        if len(row_spans) == 1 and len(column_spans) == 1:
+            continue
+        if any(
+            len(spans) > 1 and len({end - start for start, end in spans}) != 1
+            for spans in (row_spans, column_spans)
+        ):
+            continue
+
+        separator_mask = np.zeros(source.shape, dtype=bool)
+        if rows:
+            separator_mask[list(rows), :] = True
+        if columns:
+            separator_mask[:, list(columns)] = True
+        if np.any((source == separator_color) & ~separator_mask):
+            continue
+
+        content_values = source[~separator_mask]
+        content_colors = [int(value) for value in np.unique(content_values)]
+        border_mask = np.zeros(source.shape, dtype=bool)
+        border_mask[0, :] = border_mask[-1, :] = True
+        border_mask[:, 0] = border_mask[:, -1] = True
+        background = min(
+            content_colors,
+            key=lambda color: (
+                -int(np.count_nonzero(content_values == color)),
+                -int(np.count_nonzero((source == color) & border_mask & ~separator_mask)),
+                color != 0,
+                color,
+            ),
+        )
+        if background == separator_color:
+            continue
+        candidates.append((
+            background,
+            separator_color,
+            row_spans,
+            column_spans,
+            rows,
+            columns,
+        ))
+    if len(candidates) != 1:
+        raise ValueError("partition requires one unambiguous separator color")
+    return candidates[0]
+
+
+def _partition_canvas(
+    source: np.ndarray,
+    background: int,
+    rows: tuple[int, ...],
+    columns: tuple[int, ...],
+) -> np.ndarray:
+    """Create a cleared grid while preserving separator lines exactly."""
+
+    result = np.full(source.shape, background, dtype=int)
+    if rows:
+        result[list(rows), :] = source[list(rows), :]
+    if columns:
+        result[:, list(columns)] = source[:, list(columns)]
+    return result
+
+
+def partition_blueprint_expand() -> Transform:
+    """Expand the uniquely incomplete block as a colored lattice blueprint."""
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg, _, row_spans, col_spans, rows, columns = _regular_partition(source)
+        blocks = [
+            source[r0:r1, c0:c1]
+            for r0, r1 in row_spans
+            for c0, c1 in col_spans
+        ]
+        shapes = {block.shape for block in blocks}
+        if len(shapes) != 1:
+            raise ValueError("blueprint blocks must have one shape")
+        block_height, block_width = shapes.pop()
+        if (len(row_spans), len(col_spans)) != (block_height, block_width):
+            raise ValueError("blueprint cells must address the block lattice")
+
+        counts = [int(np.count_nonzero(block != bg)) for block in blocks]
+        minimum = min(counts)
+        key_indices = [index for index, count in enumerate(counts) if count == minimum]
+        if minimum == 0 or len(key_indices) != 1:
+            raise ValueError("blueprint block is not uniquely identifiable")
+        key_index = key_indices[0]
+        other_counts = [count for index, count in enumerate(counts) if index != key_index]
+        if not other_counts or len(set(other_counts)) != 1 or minimum >= other_counts[0]:
+            raise ValueError("blueprint must be uniquely less complete")
+
+        other_palettes = [
+            tuple(sorted(int(value) for value in block.flat if int(value) != bg))
+            for index, block in enumerate(blocks)
+            if index != key_index
+        ]
+        if len(set(other_palettes)) != 1:
+            raise ValueError("reference blocks do not share one color multiset")
+
+        key = blocks[key_index]
+        result = _partition_canvas(source, bg, rows, columns)
+        for local_row in range(block_height):
+            for local_column in range(block_width):
+                color = int(key[local_row, local_column])
+                if color == bg:
+                    continue
+                r0, r1 = row_spans[local_row]
+                c0, c1 = col_spans[local_column]
+                result[r0:r1, c0:c1] = color
+        return result
+
+    return _decorate(transform, "partition_blueprint_expand")
+
+
+def partition_max_count_fill(minimum_count: int = 2) -> Transform:
+    """Fill every block tied for the largest foreground-cell count."""
+
+    if minimum_count < 1:
+        raise ValueError("minimum count must be positive")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg, separator, row_spans, col_spans, rows, columns = _regular_partition(source)
+        content_colors = set(int(value) for value in np.unique(source)) - {bg, separator}
+        if len(content_colors) != 1:
+            raise ValueError("max-count fill requires one content color")
+        color = content_colors.pop()
+        counts = np.array([
+            [int(np.count_nonzero(source[r0:r1, c0:c1] == color))
+             for c0, c1 in col_spans]
+            for r0, r1 in row_spans
+        ])
+        maximum = int(counts.max())
+        if maximum < minimum_count:
+            raise ValueError("no sufficiently populated block")
+        result = _partition_canvas(source, bg, rows, columns)
+        for block_row, (r0, r1) in enumerate(row_spans):
+            for block_column, (c0, c1) in enumerate(col_spans):
+                if int(counts[block_row, block_column]) == maximum:
+                    result[r0:r1, c0:c1] = color
+        return result
+
+    return _decorate(transform, "partition_max_count_fill", minimum_count)
+
+
+def partition_marker_route(marker_color: int) -> Transform:
+    """Copy a marked template block to the lattice cell named by the marker."""
+
+    if marker_color not in range(10):
+        raise ValueError("marker color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg, _, row_spans, col_spans, rows, columns = _regular_partition(source)
+        marker_cells = np.argwhere(source == marker_color)
+        if len(marker_cells) != 1:
+            raise ValueError("marker routing requires exactly one marker")
+        marker_row, marker_column = (int(value) for value in marker_cells[0])
+
+        template: np.ndarray | None = None
+        local_marker: tuple[int, int] | None = None
+        for r0, r1 in row_spans:
+            for c0, c1 in col_spans:
+                if r0 <= marker_row < r1 and c0 <= marker_column < c1:
+                    template = source[r0:r1, c0:c1].copy()
+                    local_marker = (marker_row - r0, marker_column - c0)
+        if template is None or local_marker is None:
+            raise ValueError("marker is not inside a content block")
+        if local_marker[0] >= len(row_spans) or local_marker[1] >= len(col_spans):
+            raise ValueError("marker coordinate falls outside the block lattice")
+
+        result = _partition_canvas(source, bg, rows, columns)
+        destination_rows = row_spans[local_marker[0]]
+        destination_columns = col_spans[local_marker[1]]
+        if template.shape != (
+            destination_rows[1] - destination_rows[0],
+            destination_columns[1] - destination_columns[0],
+        ):
+            raise ValueError("template and destination block shapes differ")
+        result[
+            destination_rows[0]:destination_rows[1],
+            destination_columns[0]:destination_columns[1],
+        ] = template
+        return result
+
+    return _decorate(transform, "partition_marker_route", marker_color)
+
+
+def partition_anchor_relocate(anchor_color: int, anchor_corner: str) -> Transform:
+    """Move a panel object so one bbox corner lands on a singleton anchor.
+
+    The source panel also contains a larger component of the anchor color.
+    Both anchor components are copied to the opposite, initially empty panel;
+    the moved object then overwrites the singleton if its shape occupies the
+    selected corner.
+    """
+
+    corners = {
+        "top_left": lambda r0, c0, r1, c1: (r0, c0),
+        "top_right": lambda r0, c0, r1, c1: (r0, c1),
+        "bottom_left": lambda r0, c0, r1, c1: (r1, c0),
+        "bottom_right": lambda r0, c0, r1, c1: (r1, c1),
+    }
+    if anchor_color not in range(10):
+        raise ValueError("anchor color must be in [0, 9]")
+    if anchor_corner not in corners:
+        raise ValueError("unsupported anchor corner")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg, _, row_spans, col_spans, rows, columns = _regular_partition(source)
+        if (len(row_spans), len(col_spans)) == (2, 1):
+            panels = [source[r0:r1, col_spans[0][0]:col_spans[0][1]] for r0, r1 in row_spans]
+            orientation = "rows"
+        elif (len(row_spans), len(col_spans)) == (1, 2):
+            panels = [source[row_spans[0][0]:row_spans[0][1], c0:c1] for c0, c1 in col_spans]
+            orientation = "columns"
+        else:
+            raise ValueError("anchor relocation requires exactly two panels")
+
+        active = [index for index, panel in enumerate(panels) if np.any(panel != bg)]
+        empty = [index for index, panel in enumerate(panels) if np.all(panel == bg)]
+        if len(active) != 1 or len(empty) != 1:
+            raise ValueError("anchor relocation needs one active and one empty panel")
+        source_panel = panels[active[0]]
+        anchor_objects = Scene(source_panel).components(color=anchor_color)
+        singleton = [obj for obj in anchor_objects if obj.size == 1]
+        larger = [obj for obj in anchor_objects if obj.size > 1]
+        if len(singleton) < 1 or len(larger) != 1:
+            raise ValueError("anchor color needs singleton and larger components")
+        larger_rows = {row for row, _ in larger[0].cells}
+        larger_columns = {column for _, column in larger[0].cells}
+        aligned_singletons = [
+            obj for obj in singleton
+            if obj.cells[0][0] in larger_rows or obj.cells[0][1] in larger_columns
+        ]
+        if len(aligned_singletons) != 1:
+            raise ValueError("singleton relocation anchor is ambiguous")
+
+        object_colors = set(int(value) for value in np.unique(source_panel)) - {bg, anchor_color}
+        if len(object_colors) != 1:
+            raise ValueError("relocation requires one movable object color")
+        object_color = object_colors.pop()
+        object_cells = np.argwhere(source_panel == object_color)
+        r0, c0 = (int(value) for value in object_cells.min(axis=0))
+        r1, c1 = (int(value) for value in object_cells.max(axis=0))
+        corner_row, corner_column = corners[anchor_corner](r0, c0, r1, c1)
+        target_row, target_column = aligned_singletons[0].cells[0]
+        row_shift = target_row - corner_row
+        column_shift = target_column - corner_column
+
+        destination = np.full(source_panel.shape, bg, dtype=int)
+        destination[source_panel == anchor_color] = anchor_color
+        for row_value, column_value in object_cells:
+            row = int(row_value) + row_shift
+            column = int(column_value) + column_shift
+            if not (0 <= row < destination.shape[0] and 0 <= column < destination.shape[1]):
+                raise ValueError("relocated object leaves the destination panel")
+            destination[row, column] = object_color
+
+        result = _partition_canvas(source, bg, rows, columns)
+        target_index = empty[0]
+        if orientation == "rows":
+            rr0, rr1 = row_spans[target_index]
+            cc0, cc1 = col_spans[0]
+        else:
+            rr0, rr1 = row_spans[0]
+            cc0, cc1 = col_spans[target_index]
+        result[rr0:rr1, cc0:cc1] = destination
+        return result
+
+    return _decorate(transform, "partition_anchor_relocate", anchor_color, anchor_corner)
+
+
+def frame_and_fill_objects(
+    object_color: int,
+    frame_color: int,
+    hole_color: int,
+    background: int | None = None,
+) -> Transform:
+    """Frame each object bbox and fill holes enclosed by that object."""
+
+    if any(color not in range(10) for color in (object_color, frame_color, hole_color)):
+        raise ValueError("ARC colors must be in [0, 9]")
+    if len({object_color, frame_color, hole_color}) != 3:
+        raise ValueError("object, frame, and hole colors must differ")
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = Scene(source).background_color() if background is None else background
+        if bg in {object_color, frame_color, hole_color}:
+            raise ValueError("background must differ from drawing colors")
+        objects = Scene(source).components(color=object_color)
+        if not objects:
+            raise ValueError("no objects of the requested color")
+        result = source.copy()
+        height, width = source.shape
+
+        for obj in objects:
+            box = obj.bbox
+            window = source[box.r0:box.r1 + 1, box.c0:box.c1 + 1]
+            open_background = window == bg
+            reachable = np.zeros(window.shape, dtype=bool)
+            stack: list[tuple[int, int]] = []
+            for row in range(window.shape[0]):
+                for column in range(window.shape[1]):
+                    if row not in {0, window.shape[0] - 1} and column not in {0, window.shape[1] - 1}:
+                        continue
+                    if open_background[row, column] and not reachable[row, column]:
+                        reachable[row, column] = True
+                        stack.append((row, column))
+            while stack:
+                row, column = stack.pop()
+                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nr, nc = row + dr, column + dc
+                    if not (0 <= nr < window.shape[0] and 0 <= nc < window.shape[1]):
+                        continue
+                    if open_background[nr, nc] and not reachable[nr, nc]:
+                        reachable[nr, nc] = True
+                        stack.append((nr, nc))
+            holes = open_background & ~reachable
+            result[box.r0:box.r1 + 1, box.c0:box.c1 + 1][holes] = hole_color
+
+            top, bottom = box.r0 - 1, box.r1 + 1
+            left, right = box.c0 - 1, box.c1 + 1
+            if top >= 0:
+                for column in range(max(0, left), min(width - 1, right) + 1):
+                    if int(result[top, column]) == bg:
+                        result[top, column] = frame_color
+            if bottom < height:
+                for column in range(max(0, left), min(width - 1, right) + 1):
+                    if int(result[bottom, column]) == bg:
+                        result[bottom, column] = frame_color
+            if left >= 0:
+                for row in range(box.r0, box.r1 + 1):
+                    if int(result[row, left]) == bg:
+                        result[row, left] = frame_color
+            if right < width:
+                for row in range(box.r0, box.r1 + 1):
+                    if int(result[row, right]) == bg:
+                        result[row, right] = frame_color
+        return result
+
+    return _decorate(
+        transform,
+        "frame_and_fill_objects",
+        object_color,
+        frame_color,
+        hole_color,
+        background,
+    )

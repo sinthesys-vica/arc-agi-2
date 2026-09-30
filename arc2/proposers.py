@@ -424,6 +424,163 @@ class AnalogyProposer(Proposer):
         return [candidate]
 
 
+class PartitionBlueprintProposer(Proposer):
+    """Expand a uniquely incomplete subgrid as a lattice blueprint."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        transform = dsl.partition_blueprint_expand()
+        candidate = Hypothesis(
+            transform,
+            "expand incomplete partition block as lattice blueprint",
+            0.72,
+            4,
+            "partition-blueprint",
+        )
+        if _paired(inputs, outputs):
+            assert outputs is not None
+            return [candidate] if _exact(transform, inputs, outputs) else []
+        return [candidate]
+
+
+class PartitionMaxCountProposer(Proposer):
+    """Fill partition blocks tied for the largest foreground count."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        transform = dsl.partition_max_count_fill(2)
+        candidate = Hypothesis(
+            transform,
+            "fill partition blocks with maximum foreground count",
+            0.72,
+            4,
+            "partition-max-count",
+        )
+        if _paired(inputs, outputs):
+            assert outputs is not None
+            return [candidate] if _exact(transform, inputs, outputs) else []
+        return [candidate]
+
+
+class PartitionMarkerRouteProposer(Proposer):
+    """Route a template block to the lattice coordinate encoded by a marker."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not inputs:
+            return []
+        colors = set(inputs[0].colors)
+        for scene in inputs[1:]:
+            colors &= set(scene.colors)
+        candidates: list[Hypothesis] = []
+        for marker_color in sorted(colors):
+            transform = dsl.partition_marker_route(marker_color)
+            candidate = Hypothesis(
+                transform,
+                f"route marked partition block using color {marker_color}",
+                0.70,
+                4,
+                "partition-marker-route",
+            )
+            if not _paired(inputs, outputs):
+                candidates.append(candidate)
+            elif outputs is not None and _exact(transform, inputs, outputs):
+                candidates.append(candidate)
+        return _deduplicate(candidates)
+
+
+class PartitionAnchorRelocateProposer(Proposer):
+    """Relocate a panel object so a bbox corner meets a singleton anchor."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not inputs:
+            return []
+        colors = set(inputs[0].colors)
+        for scene in inputs[1:]:
+            colors &= set(scene.colors)
+        candidates: list[Hypothesis] = []
+        for anchor_color in sorted(colors):
+            for corner in ("top_left", "top_right", "bottom_left", "bottom_right"):
+                transform = dsl.partition_anchor_relocate(anchor_color, corner)
+                candidate = Hypothesis(
+                    transform,
+                    f"relocate panel object {corner} to anchor color {anchor_color}",
+                    0.68,
+                    5,
+                    "partition-anchor-relocate",
+                )
+                if not _paired(inputs, outputs):
+                    candidates.append(candidate)
+                elif outputs is not None and _exact(transform, inputs, outputs):
+                    candidates.append(candidate)
+        return _deduplicate(candidates)
+
+
+class FramedObjectProposer(Proposer):
+    """Infer object, outer-frame, and enclosed-hole colors."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+        object_colors = set(inputs[0].colors) - {inputs[0].background_color()}
+        for scene in inputs[1:]:
+            object_colors &= set(scene.colors) - {scene.background_color()}
+        introduced = set(outputs[0].colors) - set(inputs[0].colors)
+        for source, target in zip(inputs[1:], outputs[1:]):
+            introduced &= set(target.colors) - set(source.colors)
+
+        candidates: list[Hypothesis] = []
+        for object_color in sorted(object_colors):
+            for frame_color in sorted(introduced):
+                for hole_color in sorted(introduced - {frame_color}):
+                    transform = dsl.frame_and_fill_objects(
+                        object_color,
+                        frame_color,
+                        hole_color,
+                    )
+                    candidate = Hypothesis(
+                        transform,
+                        (
+                            f"frame color {object_color} with {frame_color} "
+                            f"and fill holes with {hole_color}"
+                        ),
+                        0.70,
+                        4,
+                        "framed-object",
+                    )
+                    if _exact(transform, inputs, outputs):
+                        candidates.append(candidate)
+        return _deduplicate(candidates)
+
+
 def default_proposers() -> list[Proposer]:
     """Return the deterministic baseline proposer set in search order."""
 
@@ -438,4 +595,9 @@ def default_proposers() -> list[Proposer]:
         D4OrbitProposer(),
         FractalProposer(),
         AnalogyProposer(),
+        PartitionBlueprintProposer(),
+        PartitionMaxCountProposer(),
+        PartitionMarkerRouteProposer(),
+        PartitionAnchorRelocateProposer(),
+        FramedObjectProposer(),
     ]
