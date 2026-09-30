@@ -14,6 +14,7 @@ import numpy as np
 
 from .scene import Scene
 from .proposers import Hypothesis
+from .dsl import signature as _dsl_signature
 
 MAX_COLOR = 9
 MIN_COLOR = 0
@@ -111,7 +112,8 @@ def structural_distance(h1: Hypothesis, h2: Hypothesis) -> float:
 
     * the program norm is PRIMARY: if both transforms are dsl.compose()
       closures, the distance is the Jaccard distance over their component
-      transform identities;
+      transform signatures (dsl.signature — semantic, not object identity:
+      two separately built instances of the same program are distance 0);
     * otherwise (not introspectable), the description tokens serve as the
       fallback norm (Jaccard distance).
 
@@ -134,7 +136,10 @@ def _token_jaccard_distance(a: str, b: str) -> float:
 
 
 def _program_jaccard_distance(f1, f2) -> float | None:
-    """Jaccard distance over component transform ids for compose() closures.
+    """Jaccard distance over component transform signatures for compose().
+
+    Keys are dsl.signature tuples (semantic), never id() (object identity):
+    two separately built instances of the same program must be distance 0.
 
     Returns None when either side is not introspectable — the caller then
     falls back to the description norm.
@@ -143,8 +148,8 @@ def _program_jaccard_distance(f1, f2) -> float | None:
     c2 = _compose_components(f2)
     if c1 is None or c2 is None:
         return None  # not introspectable — caller falls back to description
-    s1 = {id(c) for c in c1}
-    s2 = {id(c) for c in c2}
+    s1 = {_dsl_signature(c) for c in c1}
+    s2 = {_dsl_signature(c) for c in c2}
     if not s1 and not s2:
         return 0.0
     return 1.0 - len(s1 & s2) / len(s1 | s2)
@@ -382,6 +387,23 @@ def _self_test() -> None:
         Hypothesis(compose(identity), "identity transform"),
         Hypothesis(compose(identity), "do absolutely nothing at all"))
     assert d_same_prog == 0.0, d_same_prog
+
+    # regression (Atlas catch): separately built instances of the SAME
+    # program must be distance 0 — the norm is semantic, not id()-based
+    from .dsl import recolor, tile
+    def build_same_program():
+        return compose(recolor({1: 2}), tile(2, 2))
+    d_rebuilt = structural_distance(
+        Hypothesis(build_same_program(), "recolor then tile"),
+        Hypothesis(build_same_program(), "recolor then tile, other instance"),
+    )
+    assert d_rebuilt == 0.0, f"same program, separate instances: {d_rebuilt}"
+    # positive control: a different mapping in the same shape must stay apart
+    d_other_map = structural_distance(
+        Hypothesis(compose(recolor({1: 2}), tile(2, 2)), "a"),
+        Hypothesis(compose(recolor({1: 3}), tile(2, 2)), "b"),
+    )
+    assert d_other_map > 0.0, d_other_map
 
     print("verify.py self-tests: ALL PASS")
 
