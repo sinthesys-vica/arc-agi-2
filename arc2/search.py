@@ -164,7 +164,16 @@ def search(
 
         stats.proposers_tried += 1
         try:
-            candidates = proposer.propose(scenes_input)
+            # Atlas interface: propose(inputs, outputs=None)
+            # With outputs: relation-driven candidates (color map, size ratio, etc.)
+            # Without outputs: generic primitive enumeration
+            candidates = proposer.propose(scenes_input, outputs=scenes_output) or []
+        except TypeError:
+            # Proposer doesn't accept outputs kwarg — fall back
+            try:
+                candidates = proposer.propose(scenes_input) or []
+            except Exception:
+                continue
         except Exception:
             continue
 
