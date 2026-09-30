@@ -20,6 +20,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+import numpy as np
+
 from .scene import Scene
 from .proposers import Hypothesis, Proposer
 from .verify import verify_hypothesis, structural_distance as _structural_distance
@@ -88,6 +90,103 @@ def sort_by_tier(proposers: list[Proposer]) -> list[Proposer]:
 
 
 # ---------------------------------------------------------------------------
+# Feature-based pre-filtering
+# ---------------------------------------------------------------------------
+
+class TaskSignature:
+    """Lightweight feature summary of a task's training pairs.
+
+    Used to skip proposer families that cannot possibly match:
+    e.g., ResizeProposer on same_size tasks, GeometricProposer on
+    tasks where the color palette changes.
+    """
+
+    def __init__(self, train_pairs: list[dict]):
+        # Lightweight: only compute what we need for filtering,
+        # NOT full encode_pair (which runs expensive component extraction)
+        self.pairs = []
+        for p in train_pairs:
+            inp = np.asarray(p["input"], dtype=int)
+            out = np.asarray(p["output"], dtype=int)
+            in_colors = set(int(x) for x in np.unique(inp))
+            out_colors = set(int(x) for x in np.unique(out))
+            self.pairs.append({
+                "same_size": inp.shape == out.shape,
+                "size_delta": [out.shape[0] - inp.shape[0], out.shape[1] - inp.shape[1]],
+                "size_ratio": [
+                    round(out.shape[0] / inp.shape[0], 4),
+                    round(out.shape[1] / inp.shape[1], 4),
+                ] if inp.shape[0] and inp.shape[1] else None,
+                "colors_only_in": sorted(in_colors - out_colors),
+                "colors_only_out": sorted(out_colors - in_colors),
+            })
+
+    @property
+    def all_same_size(self) -> bool:
+        return all(p["same_size"] for p in self.pairs)
+
+    @property
+    def all_different_size(self) -> bool:
+        return all(not p["same_size"] for p in self.pairs)
+
+    @property
+    def has_color_change(self) -> bool:
+        """True if any pair has colors appearing/disappearing."""
+        return any(p["colors_only_in"] or p["colors_only_out"] for p in self.pairs)
+
+    @property
+    def consistent_size_ratio(self) -> tuple[float, float] | None:
+        """If all pairs share the same integer size ratio, return it."""
+        if not self.pairs or self.all_same_size:
+            return None
+        ratios = [tuple(p["size_ratio"]) for p in self.pairs if p["size_ratio"]]
+        if not ratios:
+            return None
+        if all(r == ratios[0] for r in ratios):
+            return ratios[0]
+        return None
+
+    @property
+    def output_smaller(self) -> bool:
+        """True if output is strictly smaller than input in all pairs."""
+        return all(
+            p["size_delta"][0] < 0 or p["size_delta"][1] < 0
+            for p in self.pairs
+        )
+
+
+def should_skip_proposer(proposer: Proposer, sig: TaskSignature) -> bool:
+    """Return True if this proposer cannot match the task signature.
+
+    Conservative: only skips when we're CERTAIN the proposer can't help.
+    False negatives are fine; false positives lose solutions.
+    """
+    name = type(proposer).__name__
+
+    # ResizeProposer: skip if all pairs are same size
+    if name == "ResizeProposer" and sig.all_same_size:
+        return True
+
+    # GeometricProposer (pure D4): skip if colors change between in/out
+    # (D4 transforms don't change colors)
+    if name == "GeometricProposer" and sig.has_color_change:
+        return True
+
+    # CropProposer: skip if output is larger than input
+    if name == "CropProposer" and not sig.output_smaller and not sig.all_same_size:
+        # Crop can only make things smaller or same
+        if all(
+            p["size_delta"][0] >= 0 and p["size_delta"][1] >= 0
+            for p in sig.pairs
+        ):
+            # Output >= input in both dims, and not same size → growing, not cropping
+            if sig.all_different_size:
+                return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Structural diversity
 # ---------------------------------------------------------------------------
 
@@ -152,6 +251,9 @@ def search(
     scenes_input = [Scene.from_list(pair["input"]) for pair in train_pairs]
     scenes_output = [Scene.from_list(pair["output"]) for pair in train_pairs]
 
+    # Pre-compute task signature for proposer filtering
+    task_sig = TaskSignature(train_pairs)
+
     ordered = sort_by_tier(proposers)
     valid: list[Hypothesis] = []
     found_best = False
@@ -161,6 +263,10 @@ def search(
         elapsed = time.monotonic() - t0
         if elapsed >= time_budget_seconds:
             break
+
+        # Skip proposers that can't match this task's signature
+        if should_skip_proposer(proposer, task_sig):
+            continue
 
         stats.proposers_tried += 1
         try:
