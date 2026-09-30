@@ -110,10 +110,11 @@ def structural_distance(h1: Hypothesis, h2: Hypothesis) -> float:
     the programs differ — and the structural diversity is what matters for
     the second attempt. The norm here is program-level:
 
-    * the program norm is PRIMARY: if both transforms are dsl.compose()
-      closures, the distance is the Jaccard distance over their component
-      transform signatures (dsl.signature — semantic, not object identity:
-      two separately built instances of the same program are distance 0);
+    * the program norm is PRIMARY: if both transforms carry program keys
+      (compose() component signatures, or the transform's own dsl signature),
+      the distance is the Jaccard distance over those key sets — semantic,
+      not object identity: two separately built instances of the same
+      program are distance 0;
     * otherwise (not introspectable), the description tokens serve as the
       fallback norm (Jaccard distance).
 
@@ -135,21 +136,35 @@ def _token_jaccard_distance(a: str, b: str) -> float:
     return 1.0 - len(ta & tb) / len(ta | tb)
 
 
-def _program_jaccard_distance(f1, f2) -> float | None:
-    """Jaccard distance over component transform signatures for compose().
+def _program_key_set(f) -> set[tuple] | None:
+    """The semantic key set of a transform in the program space.
 
-    Keys are dsl.signature tuples (semantic), never id() (object identity):
-    two separately built instances of the same program must be distance 0.
+    * compose() closures: the dsl.signature of each component;
+    * other transforms carrying a dsl signature: {signature(f)};
+    * otherwise None (not introspectable).
+
+    Keys are signatures, never id(): two separately built instances of the
+    same program must be distance 0.
+    """
+    components = _compose_components(f)
+    if components is not None:
+        return {_dsl_signature(c) for c in components}
+    sig = getattr(f, "_arc2_signature", None)
+    if sig is not None:
+        return {tuple(sig)}
+    return None
+
+
+def _program_jaccard_distance(f1, f2) -> float | None:
+    """Jaccard distance over semantic program key sets.
 
     Returns None when either side is not introspectable — the caller then
     falls back to the description norm.
     """
-    c1 = _compose_components(f1)
-    c2 = _compose_components(f2)
-    if c1 is None or c2 is None:
-        return None  # not introspectable — caller falls back to description
-    s1 = {_dsl_signature(c) for c in c1}
-    s2 = {_dsl_signature(c) for c in c2}
+    s1 = _program_key_set(f1)
+    s2 = _program_key_set(f2)
+    if s1 is None or s2 is None:
+        return None
     if not s1 and not s2:
         return 0.0
     return 1.0 - len(s1 & s2) / len(s1 | s2)
@@ -404,6 +419,19 @@ def _self_test() -> None:
         Hypothesis(compose(recolor({1: 3}), tile(2, 2)), "b"),
     )
     assert d_other_map > 0.0, d_other_map
+
+    # single-primitive transforms: their own dsl signature is the program key
+    from .dsl import rotate
+    d_single_diff = structural_distance(
+        Hypothesis(identity, "identity transform"),
+        Hypothesis(rotate(2), "rotate 180 degrees"),
+    )
+    assert d_single_diff == 1.0, d_single_diff
+    d_single_same = structural_distance(
+        Hypothesis(identity, "identity transform"),
+        Hypothesis(identity, "leave everything exactly as it is"),
+    )
+    assert d_single_same == 0.0, d_single_same
 
     print("verify.py self-tests: ALL PASS")
 
