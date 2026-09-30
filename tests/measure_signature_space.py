@@ -97,7 +97,9 @@ def main() -> int:
             ]
             pairwise.extend(distances)
             per_task_max.append(max(distances))
-            per_task_min_nonzero.append(min(d for d in distances if d > 0))
+            nonzero = [d for d in distances if d > 0]
+            if nonzero:
+                per_task_min_nonzero.append(min(nonzero))
 
     print(f"tasks with 2+ verified hypotheses: {tasks_with_alt_candidates}")
     print(f"pairwise distances measured: {len(pairwise)}")

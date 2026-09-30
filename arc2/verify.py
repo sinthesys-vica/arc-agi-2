@@ -136,11 +136,32 @@ def _token_jaccard_distance(a: str, b: str) -> float:
     return 1.0 - len(ta & tb) / len(ta | tb)
 
 
+_IDENTITY_SIG: tuple = ("identity",)
+
+# Signatures that are semantically the identity transform.
+# (Canonical form lives here until dsl.py owns the semantics itself.)
+_IDENTITY_EQUIVALENTS = frozenset({
+    ("tile", 1, 1),
+    ("scale", 1, 1),
+    ("rotate", 0),
+})
+
+
+def _canonical_key(sig: tuple) -> tuple:
+    """Normalize semantically-identity signatures to the identity key."""
+    if sig == _IDENTITY_SIG or sig in _IDENTITY_EQUIVALENTS:
+        return _IDENTITY_SIG
+    return sig
+
+
 def _program_key_set(f) -> set[tuple] | None:
     """The semantic key set of a transform in the program space.
 
-    * compose() closures: the dsl.signature of each component;
-    * other transforms carrying a dsl signature: {signature(f)};
+    * compose() closures: the dsl.signature of each component, with no-op
+      decorations (tile(1,1), scale(1,1), rotate(0)) normalized to identity
+      and dropped as unit elements; a compose of only no-ops keys as
+      {identity};
+    * other transforms carrying a dsl signature: {canonical signature};
     * otherwise None (not introspectable).
 
     Keys are signatures, never id(): two separately built instances of the
@@ -148,10 +169,12 @@ def _program_key_set(f) -> set[tuple] | None:
     """
     components = _compose_components(f)
     if components is not None:
-        return {_dsl_signature(c) for c in components}
+        keys = {_canonical_key(_dsl_signature(c)) for c in components}
+        keys.discard(_IDENTITY_SIG)  # identity is the unit of composition
+        return keys if keys else {_IDENTITY_SIG}
     sig = getattr(f, "_arc2_signature", None)
     if sig is not None:
-        return {tuple(sig)}
+        return {_canonical_key(tuple(sig))}
     return None
 
 
@@ -421,7 +444,7 @@ def _self_test() -> None:
     assert d_other_map > 0.0, d_other_map
 
     # single-primitive transforms: their own dsl signature is the program key
-    from .dsl import rotate
+    from .dsl import rotate, scale
     d_single_diff = structural_distance(
         Hypothesis(identity, "identity transform"),
         Hypothesis(rotate(2), "rotate 180 degrees"),
@@ -432,6 +455,35 @@ def _self_test() -> None:
         Hypothesis(identity, "leave everything exactly as it is"),
     )
     assert d_single_same == 0.0, d_single_same
+
+    # no-op decoration canonicalization: tile(1,1)/scale(1,1)/rotate(0) are
+    # identity, and identity is the unit element of composition
+    d_noop_tile = structural_distance(
+        Hypothesis(recolor({1: 2}), "recolor"),
+        Hypothesis(compose(recolor({1: 2}), tile(1, 1)), "recolor then tile 1x1"),
+    )
+    assert d_noop_tile == 0.0, f"no-op tile decoration: {d_noop_tile}"
+    d_noop_scale = structural_distance(
+        Hypothesis(recolor({1: 2}), "recolor"),
+        Hypothesis(compose(recolor({1: 2}), scale(1, 1)), "recolor then scale 1x1"),
+    )
+    assert d_noop_scale == 0.0, f"no-op scale decoration: {d_noop_scale}"
+    d_only_noops = structural_distance(
+        Hypothesis(identity, "identity"),
+        Hypothesis(compose(identity), "compose of only identity"),
+    )
+    assert d_only_noops == 0.0, f"compose of only no-ops: {d_only_noops}"
+    d_rotate0 = structural_distance(
+        Hypothesis(identity, "identity"),
+        Hypothesis(rotate(0), "rotate 0"),
+    )
+    assert d_rotate0 == 0.0, f"rotate 0 is identity: {d_rotate0}"
+    # positive control: a real tile factor stays apart
+    d_real_tile = structural_distance(
+        Hypothesis(recolor({1: 2}), "recolor"),
+        Hypothesis(compose(recolor({1: 2}), tile(2, 2)), "recolor then tile 2x2"),
+    )
+    assert d_real_tile > 0.0, d_real_tile
 
     print("verify.py self-tests: ALL PASS")
 
