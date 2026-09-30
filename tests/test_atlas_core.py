@@ -10,7 +10,9 @@ from arc2 import dsl
 from arc2.proposers import (
     ColorMapProposer,
     GeometricProposer,
+    LargestComponentProposer,
     ResizeProposer,
+    RoutedRibbonProposer,
     default_proposers,
 )
 from arc2.scene import Scene
@@ -78,6 +80,32 @@ class DSLTests(unittest.TestCase):
         ]))
         np.testing.assert_array_equal(actual, [[7, 7]])
 
+    def test_largest_component_histogram(self) -> None:
+        transform = dsl.largest_component_histogram("left_to_right", "rows")
+        actual = transform(np.array([
+            [0, 5, 0, 0, 2, 2],
+            [0, 5, 5, 0, 0, 2],
+            [9, 0, 0, 0, 0, 0],
+        ]))
+        np.testing.assert_array_equal(actual, [[5, 2], [5, 2], [5, 2]])
+
+    def test_routed_ribbon_preserves_obstacle_and_bridges_detour(self) -> None:
+        transform = dsl.routed_ribbon(2, -1, 1, width=2)
+        actual = transform(np.array([
+            [0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0],
+            [0, 2, 0, 0, 0, 0, 0],
+        ]))
+        np.testing.assert_array_equal(actual, [
+            [0, 0, 0, 0, 0, 2, 2],
+            [0, 0, 0, 1, 2, 2, 0],
+            [0, 0, 2, 2, 2, 0, 0],
+            [0, 2, 2, 0, 0, 0, 0],
+            [0, 2, 0, 0, 0, 0, 0],
+        ])
+
 
 class ProposerTests(unittest.TestCase):
     @staticmethod
@@ -109,6 +137,28 @@ class ProposerTests(unittest.TestCase):
         for proposal in proposals:
             for source, target in zip(inputs, outputs):
                 np.testing.assert_array_equal(proposal.transform(source.grid), target.grid)
+
+    def test_largest_component_proposer(self) -> None:
+        source = Scene([
+            [0, 5, 0, 0, 2, 2],
+            [0, 5, 5, 0, 0, 2],
+            [9, 0, 0, 0, 0, 0],
+        ])
+        target = Scene([[5, 2], [5, 2], [5, 2]])
+        proposals = LargestComponentProposer().propose([source], [target])
+        self.assertTrue(any("left to right" in h.description for h in proposals))
+
+    def test_routed_ribbon_proposer(self) -> None:
+        source = Scene([
+            [0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0],
+            [0, 2, 0, 0, 0, 0, 0],
+        ])
+        target = Scene(dsl.routed_ribbon(2, -1, 1, 2)(source.grid))
+        proposals = RoutedRibbonProposer().propose([source], [target])
+        self.assertTrue(any("direction -1,1 width 2" in h.description for h in proposals))
 
     def test_default_proposers_integrate_with_search(self) -> None:
         train = [{

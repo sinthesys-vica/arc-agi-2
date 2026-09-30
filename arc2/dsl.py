@@ -198,3 +198,127 @@ def keep_colors(colors: set[int] | tuple[int, ...], background: int = 0) -> Tran
         return np.where(np.isin(arr, kept), arr, background).astype(int, copy=False)
 
     return _decorate(transform, "keep_colors", kept, background)
+
+
+def largest_component_histogram(
+    order: str = "left_to_right",
+    layout: str = "rows",
+) -> Transform:
+    """Render the colors of all largest components as a solid histogram.
+
+    The selected component size becomes the repeated dimension. This captures
+    a reusable object-selection family without baking in a task identifier.
+    """
+
+    orders = {
+        "left_to_right": lambda obj: (obj.bbox.c0, obj.bbox.r0, obj.color),
+        "right_to_left": lambda obj: (-obj.bbox.c1, obj.bbox.r0, obj.color),
+        "top_to_bottom": lambda obj: (obj.bbox.r0, obj.bbox.c0, obj.color),
+        "bottom_to_top": lambda obj: (-obj.bbox.r1, obj.bbox.c0, obj.color),
+    }
+    if order not in orders:
+        raise ValueError(f"unsupported component order: {order}")
+    if layout not in {"rows", "columns"}:
+        raise ValueError("layout must be 'rows' or 'columns'")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        objects = Scene(_grid(grid)).objects()
+        if not objects:
+            raise ValueError("largest-component histogram requires foreground objects")
+        largest = max(obj.size for obj in objects)
+        selected = sorted(
+            (obj for obj in objects if obj.size == largest),
+            key=orders[order],
+        )
+        palette = np.array([obj.color for obj in selected], dtype=int)
+        if layout == "rows":
+            return np.tile(palette[np.newaxis, :], (largest, 1))
+        return np.tile(palette[:, np.newaxis], (1, largest))
+
+    return _decorate(transform, "largest_component_histogram", order, layout)
+
+
+def routed_ribbon(
+    anchor_color: int,
+    row_direction: int,
+    column_direction: int,
+    width: int = 2,
+    background: int | None = None,
+) -> Transform:
+    """Grow a diagonal ribbon through background cells around obstacles.
+
+    A singleton anchor starts the ribbon. Each next row is scanned in the
+    horizontal direction from the previous leading edge. Obstacles are left
+    untouched, while the previous row is widened to join a detour.
+    """
+
+    if anchor_color not in range(10):
+        raise ValueError("anchor color must be in [0, 9]")
+    if row_direction not in {-1, 1} or column_direction not in {-1, 1}:
+        raise ValueError("ribbon directions must be -1 or 1")
+    if width < 1:
+        raise ValueError("ribbon width must be positive")
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = Scene(source).background_color() if background is None else background
+        anchors = np.argwhere(source == anchor_color)
+        if len(anchors) != 1:
+            raise ValueError("routed ribbon requires exactly one anchor cell")
+
+        output = source.copy()
+        rows, columns = source.shape
+        previous_row, scan_start = (int(value) for value in anchors[0])
+        row = previous_row + row_direction
+
+        while 0 <= row < rows:
+            column_range = (
+                range(scan_start, columns)
+                if column_direction == 1
+                else range(scan_start, -1, -1)
+            )
+            painted: list[int] = []
+            for column in column_range:
+                if int(source[row, column]) == bg:
+                    output[row, column] = anchor_color
+                    painted.append(column)
+                    if len(painted) == width:
+                        break
+            if not painted:
+                break
+
+            previous_cells = np.flatnonzero(output[previous_row] == anchor_color)
+            if not len(previous_cells):
+                raise ValueError("ribbon lost its previous segment")
+            previous_lead = (
+                int(previous_cells.max())
+                if column_direction == 1
+                else int(previous_cells.min())
+            )
+            for column in range(
+                previous_lead + column_direction,
+                painted[0] + column_direction,
+                column_direction,
+            ):
+                if int(source[previous_row, column]) == bg:
+                    output[previous_row, column] = anchor_color
+
+            previous_row = row
+            scan_start = painted[-1]
+            if len(painted) < width:
+                break
+            row += row_direction
+
+        return output
+
+    return _decorate(
+        transform,
+        "routed_ribbon",
+        anchor_color,
+        row_direction,
+        column_direction,
+        width,
+        background,
+    )
