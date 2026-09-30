@@ -581,6 +581,166 @@ class FramedObjectProposer(Proposer):
         return _deduplicate(candidates)
 
 
+class AxialCrossProposer(Proposer):
+    """Infer full row-and-column marker crosses with a collision color."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+        introduced = set(outputs[0].colors) - set(inputs[0].colors)
+        for source, target in zip(inputs[1:], outputs[1:]):
+            introduced &= set(target.colors) - set(source.colors)
+        candidates: list[Hypothesis] = []
+        for collision_color in sorted(introduced):
+            transform = dsl.axial_cross_lines(collision_color)
+            candidate = Hypothesis(
+                transform,
+                f"draw axial marker crosses with collision color {collision_color}",
+                0.72,
+                4,
+                "axial-cross",
+            )
+            if _exact(transform, inputs, outputs):
+                candidates.append(candidate)
+        return _deduplicate(candidates)
+
+
+class ClosestHorizontalPairProposer(Proposer):
+    """Connect rows tied for the smallest gap between equal-color endpoints."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        transform = dsl.connect_closest_horizontal_pairs()
+        candidate = Hypothesis(
+            transform,
+            "connect horizontal endpoint pairs with the smallest gap",
+            0.70,
+            4,
+            "closest-horizontal-pair",
+        )
+        if _paired(inputs, outputs):
+            assert outputs is not None
+            return [candidate] if _exact(transform, inputs, outputs) else []
+        return [candidate]
+
+
+class MarkerFrameProposer(Proposer):
+    """Infer a clipped square expansion around singleton markers."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+        marker_colors = set(inputs[0].colors) - {inputs[0].background_color()}
+        introduced = set(outputs[0].colors) - set(inputs[0].colors)
+        for source, target in zip(inputs[1:], outputs[1:]):
+            marker_colors &= set(source.colors) - {source.background_color()}
+            introduced &= set(target.colors) - set(source.colors)
+        candidates: list[Hypothesis] = []
+        for marker_color in sorted(marker_colors):
+            for frame_color in sorted(introduced):
+                transform = dsl.frame_around_markers(marker_color, frame_color, radius=1)
+                candidate = Hypothesis(
+                    transform,
+                    f"expand marker color {marker_color} with a clipped 3x3 frame {frame_color}",
+                    0.72,
+                    3,
+                    "marker-frame",
+                )
+                if _exact(transform, inputs, outputs):
+                    candidates.append(candidate)
+        return _deduplicate(candidates)
+
+
+class PeriodicStripeProposer(Proposer):
+    """Extend two boundary markers as alternating periodic stripes."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        transform = dsl.periodic_boundary_stripes()
+        candidate = Hypothesis(
+            transform,
+            "extend boundary markers as alternating periodic stripes",
+            0.70,
+            4,
+            "periodic-stripe",
+        )
+        if _paired(inputs, outputs):
+            assert outputs is not None
+            return [candidate] if _exact(transform, inputs, outputs) else []
+        return [candidate]
+
+
+class OrientedMarkerLineProposer(Proposer):
+    """Infer which marker colors draw rows or columns and their precedence."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+        colors = sorted({
+            color
+            for scene in inputs
+            for color in scene.colors
+            if color != scene.background_color()
+        })
+        if not colors or len(colors) > 6:
+            return []
+        candidates: list[Hypothesis] = []
+        for mask in range(1 << len(colors)):
+            vertical = {color for index, color in enumerate(colors) if mask & (1 << index)}
+            horizontal = set(colors) - vertical
+            for horizontal_overwrites in (True, False):
+                transform = dsl.oriented_marker_lines(
+                    vertical,
+                    horizontal,
+                    horizontal_overwrites,
+                )
+                candidate = Hypothesis(
+                    transform,
+                    (
+                        f"draw vertical colors {sorted(vertical)} and horizontal colors "
+                        f"{sorted(horizontal)} with "
+                        f"{'row' if horizontal_overwrites else 'column'} precedence"
+                    ),
+                    0.68,
+                    5,
+                    "oriented-marker-lines",
+                )
+                if _exact(transform, inputs, outputs):
+                    candidates.append(candidate)
+        return _deduplicate(candidates)
+
+
 def default_proposers() -> list[Proposer]:
     """Return the deterministic baseline proposer set in search order."""
 
@@ -600,4 +760,9 @@ def default_proposers() -> list[Proposer]:
         PartitionMarkerRouteProposer(),
         PartitionAnchorRelocateProposer(),
         FramedObjectProposer(),
+        AxialCrossProposer(),
+        ClosestHorizontalPairProposer(),
+        MarkerFrameProposer(),
+        PeriodicStripeProposer(),
+        OrientedMarkerLineProposer(),
     ]

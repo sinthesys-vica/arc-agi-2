@@ -9,17 +9,22 @@ import numpy as np
 from arc2 import dsl
 from arc2.proposers import (
     AnalogyProposer,
+    AxialCrossProposer,
+    ClosestHorizontalPairProposer,
     ColorMapProposer,
     D4OrbitProposer,
     FractalProposer,
     GeometricProposer,
     LargestComponentProposer,
+    MarkerFrameProposer,
     NestedRectangleProposer,
     FramedObjectProposer,
     PartitionAnchorRelocateProposer,
     PartitionBlueprintProposer,
     PartitionMarkerRouteProposer,
     PartitionMaxCountProposer,
+    PeriodicStripeProposer,
+    OrientedMarkerLineProposer,
     ResizeProposer,
     RoutedRibbonProposer,
     default_proposers,
@@ -234,6 +239,75 @@ class DSLTests(unittest.TestCase):
             [8, 3, 3, 3, 3, 3, 8],
         ])
 
+    def test_axial_cross_lines_marks_different_color_collisions(self) -> None:
+        source = np.array([
+            [0, 8, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 7],
+            [0, 0, 0, 0],
+        ])
+        np.testing.assert_array_equal(dsl.axial_cross_lines(2)(source), [
+            [8, 8, 8, 2],
+            [0, 8, 0, 7],
+            [7, 2, 7, 7],
+            [0, 8, 0, 7],
+        ])
+
+    def test_closest_horizontal_pairs_only_fills_minimum_gap(self) -> None:
+        source = np.array([
+            [2, 0, 0, 0, 0, 2],
+            [0, 2, 0, 0, 2, 0],
+            [0, 0, 0, 0, 0, 0],
+            [0, 2, 0, 0, 2, 0],
+        ])
+        np.testing.assert_array_equal(dsl.connect_closest_horizontal_pairs()(source), [
+            [2, 0, 0, 0, 0, 2],
+            [0, 2, 2, 2, 2, 0],
+            [0, 0, 0, 0, 0, 0],
+            [0, 2, 2, 2, 2, 0],
+        ])
+
+    def test_marker_frame_clips_at_corner(self) -> None:
+        source = np.array([
+            [5, 0, 0],
+            [0, 0, 0],
+            [0, 0, 0],
+        ])
+        np.testing.assert_array_equal(dsl.frame_around_markers(5, 1)(source), [
+            [5, 1, 0],
+            [1, 1, 0],
+            [0, 0, 0],
+        ])
+
+    def test_periodic_boundary_stripes(self) -> None:
+        source = np.zeros((7, 4), dtype=int)
+        source[1, 0] = 2
+        source[3, 3] = 3
+        np.testing.assert_array_equal(dsl.periodic_boundary_stripes()(source), [
+            [0, 0, 0, 0],
+            [2, 2, 2, 2],
+            [0, 0, 0, 0],
+            [3, 3, 3, 3],
+            [0, 0, 0, 0],
+            [2, 2, 2, 2],
+            [0, 0, 0, 0],
+        ])
+
+    def test_oriented_marker_lines_row_precedence(self) -> None:
+        source = np.array([
+            [0, 0, 2, 0],
+            [0, 0, 0, 3],
+            [0, 0, 0, 0],
+        ])
+        np.testing.assert_array_equal(
+            dsl.oriented_marker_lines({2}, {3}, horizontal_overwrites=True)(source),
+            [
+                [0, 0, 2, 0],
+                [3, 3, 3, 3],
+                [0, 0, 2, 0],
+            ],
+        )
+
 
 class ProposerTests(unittest.TestCase):
     @staticmethod
@@ -348,6 +422,30 @@ class ProposerTests(unittest.TestCase):
         self.assertTrue(any(isinstance(p, PartitionBlueprintProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, PartitionMarkerRouteProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, PartitionAnchorRelocateProposer) for p in defaults))
+
+        cross_input = Scene([
+            [0, 8, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 7],
+            [0, 0, 0, 0],
+        ])
+        cross_output = Scene(dsl.axial_cross_lines(2)(cross_input.grid))
+        self.assertTrue(AxialCrossProposer().propose([cross_input], [cross_output]))
+
+        pair_input = Scene([
+            [2, 0, 0, 0, 0, 2],
+            [0, 2, 0, 0, 2, 0],
+            [0, 0, 0, 0, 0, 0],
+            [0, 2, 0, 0, 2, 0],
+        ])
+        pair_output = Scene(dsl.connect_closest_horizontal_pairs()(pair_input.grid))
+        self.assertTrue(
+            ClosestHorizontalPairProposer().propose([pair_input], [pair_output])
+        )
+
+        self.assertTrue(any(isinstance(p, MarkerFrameProposer) for p in defaults))
+        self.assertTrue(any(isinstance(p, PeriodicStripeProposer) for p in defaults))
+        self.assertTrue(any(isinstance(p, OrientedMarkerLineProposer) for p in defaults))
 
     def test_default_proposers_integrate_with_search(self) -> None:
         train = [{

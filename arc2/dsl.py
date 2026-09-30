@@ -990,3 +990,250 @@ def frame_and_fill_objects(
         hole_color,
         background,
     )
+
+
+def axial_cross_lines(collision_color: int, background: int | None = None) -> Transform:
+    """Draw a full row and column through every singleton marker.
+
+    Cells claimed by different marker colors receive ``collision_color``.
+    Intersections of lines carrying the same color keep that color.
+    """
+
+    if collision_color not in range(10):
+        raise ValueError("collision color must be in [0, 9]")
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = Scene(source).background_color() if background is None else background
+        markers = Scene(source).objects()
+        if len(markers) < 2 or any(marker.size != 1 for marker in markers):
+            raise ValueError("axial crosses require at least two singleton markers")
+        if any(marker.color == collision_color for marker in markers):
+            raise ValueError("collision color may not be a marker color")
+
+        claims = [[set() for _ in range(source.shape[1])] for _ in range(source.shape[0])]
+        for marker in markers:
+            row, column = marker.cells[0]
+            for cc in range(source.shape[1]):
+                claims[row][cc].add(marker.color)
+            for rr in range(source.shape[0]):
+                claims[rr][column].add(marker.color)
+
+        result = np.full(source.shape, bg, dtype=int)
+        for row in range(source.shape[0]):
+            for column in range(source.shape[1]):
+                colors = claims[row][column]
+                if len(colors) == 1:
+                    result[row, column] = next(iter(colors))
+                elif len(colors) > 1:
+                    result[row, column] = collision_color
+        return result
+
+    return _decorate(transform, "axial_cross_lines", collision_color, background)
+
+
+def connect_closest_horizontal_pairs(background: int | None = None) -> Transform:
+    """Connect every horizontal pair tied for the smallest interior gap."""
+
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = Scene(source).background_color() if background is None else background
+        pairs: list[tuple[int, int, int, int]] = []
+        for row in range(source.shape[0]):
+            columns = np.flatnonzero(source[row] != bg)
+            if not len(columns):
+                continue
+            if len(columns) != 2:
+                raise ValueError("each active row must contain exactly two endpoints")
+            left, right = (int(value) for value in columns)
+            color = int(source[row, left])
+            if int(source[row, right]) != color:
+                raise ValueError("row endpoints must share one color")
+            pairs.append((row, left, right, color))
+        if len(pairs) < 2:
+            raise ValueError("closest-pair connection requires multiple endpoint rows")
+
+        minimum_gap = min(right - left - 1 for _, left, right, _ in pairs)
+        result = source.copy()
+        for row, left, right, color in pairs:
+            if right - left - 1 == minimum_gap:
+                result[row, left:right + 1] = color
+        return result
+
+    return _decorate(transform, "connect_closest_horizontal_pairs", background)
+
+
+def frame_around_markers(
+    marker_color: int,
+    frame_color: int,
+    radius: int = 1,
+    background: int | None = None,
+) -> Transform:
+    """Draw a square ring around each isolated marker, clipping at borders."""
+
+    if marker_color not in range(10) or frame_color not in range(10):
+        raise ValueError("marker and frame colors must be in [0, 9]")
+    if marker_color == frame_color:
+        raise ValueError("marker and frame colors must differ")
+    if radius < 1:
+        raise ValueError("frame radius must be positive")
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = Scene(source).background_color() if background is None else background
+        if set(int(value) for value in np.unique(source)) - {bg} != {marker_color}:
+            raise ValueError("marker framing requires one foreground color")
+        markers = Scene(source).components(color=marker_color)
+        if not markers or any(marker.size != 1 for marker in markers):
+            raise ValueError("marker framing requires isolated singleton markers")
+        result = source.copy()
+        for marker in markers:
+            row, column = marker.cells[0]
+            ring = [
+                (rr, cc)
+                for rr in range(max(0, row - radius), min(source.shape[0], row + radius + 1))
+                for cc in range(max(0, column - radius), min(source.shape[1], column + radius + 1))
+                if max(abs(rr - row), abs(cc - column)) == radius
+            ]
+            if any(int(source[rr, cc]) != bg for rr, cc in ring):
+                raise ValueError("marker frames overlap foreground content")
+            for rr, cc in ring:
+                if int(result[rr, cc]) not in {bg, frame_color}:
+                    raise ValueError("marker frames overlap ambiguously")
+                result[rr, cc] = frame_color
+        return result
+
+    return _decorate(
+        transform,
+        "frame_around_markers",
+        marker_color,
+        frame_color,
+        radius,
+        background,
+    )
+
+
+def periodic_boundary_stripes(background: int | None = None) -> Transform:
+    """Extend two boundary markers as alternating, equally spaced stripes."""
+
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = Scene(source).background_color() if background is None else background
+        cells = np.argwhere(source != bg)
+        if len(cells) != 2:
+            raise ValueError("periodic stripes require exactly two markers")
+        markers = [
+            (int(row), int(column), int(source[row, column]))
+            for row, column in cells
+        ]
+        if markers[0][2] == markers[1][2]:
+            raise ValueError("periodic stripe markers must have different colors")
+
+        column_boundary = all(
+            column in {0, source.shape[1] - 1}
+            for _, column, _ in markers
+        )
+        row_boundary = all(
+            row in {0, source.shape[0] - 1}
+            for row, _, _ in markers
+        )
+        if column_boundary == row_boundary:
+            raise ValueError("stripe orientation is ambiguous")
+
+        result = np.full(source.shape, bg, dtype=int)
+        if column_boundary:
+            ordered = sorted((row, color) for row, _, color in markers)
+            limit = source.shape[0]
+            horizontal = True
+        else:
+            ordered = sorted((column, color) for _, column, color in markers)
+            limit = source.shape[1]
+            horizontal = False
+        step = ordered[1][0] - ordered[0][0]
+        if step <= 0:
+            raise ValueError("stripe markers must differ along the stripe axis")
+        for stripe_index, coordinate in enumerate(range(ordered[0][0], limit, step)):
+            color = ordered[stripe_index % 2][1]
+            if horizontal:
+                result[coordinate, :] = color
+            else:
+                result[:, coordinate] = color
+        return result
+
+    return _decorate(transform, "periodic_boundary_stripes", background)
+
+
+def oriented_marker_lines(
+    vertical_colors: set[int] | tuple[int, ...],
+    horizontal_colors: set[int] | tuple[int, ...],
+    horizontal_overwrites: bool = True,
+    background: int | None = None,
+) -> Transform:
+    """Extend marker colors in configured directions with explicit precedence."""
+
+    vertical = tuple(sorted(int(color) for color in vertical_colors))
+    horizontal = tuple(sorted(int(color) for color in horizontal_colors))
+    if any(color not in range(10) for color in (*vertical, *horizontal)):
+        raise ValueError("line colors must be in [0, 9]")
+    if set(vertical) & set(horizontal):
+        raise ValueError("vertical and horizontal colors must be disjoint")
+    if not vertical and not horizontal:
+        raise ValueError("at least one line color is required")
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = Scene(source).background_color() if background is None else background
+        configured = set(vertical) | set(horizontal)
+        present = set(int(value) for value in np.unique(source)) - {bg}
+        if not present or not present <= configured:
+            raise ValueError("grid contains unconfigured marker colors")
+
+        vertical_claims: dict[int, int] = {}
+        horizontal_claims: dict[int, int] = {}
+        for row_value, column_value in np.argwhere(source != bg):
+            row, column = int(row_value), int(column_value)
+            color = int(source[row, column])
+            claims = vertical_claims if color in vertical else horizontal_claims
+            coordinate = column if color in vertical else row
+            previous = claims.setdefault(coordinate, color)
+            if previous != color:
+                raise ValueError("different colors claim the same line")
+
+        result = np.full(source.shape, bg, dtype=int)
+
+        def draw_vertical() -> None:
+            for column, color in vertical_claims.items():
+                result[:, column] = color
+
+        def draw_horizontal() -> None:
+            for row, color in horizontal_claims.items():
+                result[row, :] = color
+
+        if horizontal_overwrites:
+            draw_vertical()
+            draw_horizontal()
+        else:
+            draw_horizontal()
+            draw_vertical()
+        return result
+
+    return _decorate(
+        transform,
+        "oriented_marker_lines",
+        vertical,
+        horizontal,
+        horizontal_overwrites,
+        background,
+    )
