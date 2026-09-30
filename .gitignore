@@ -1,0 +1,66 @@
+# Data & datasets
+data/
+datasets/
+*.json.gz
+*.npy
+*.npz
+*.pkl
+*.pickle
+
+# Sealed source / evaluation
+sealed-source/
+evaluation/
+
+# Traces & artifacts
+traces/
+artifacts/
+*.jsonl
+*.trace
+
+# Environment & secrets
+.env
+.env.*
+*.key
+*.pem
+*.token
+credentials/
+secrets/
+
+# Session & personal
+session_backups/
+memory/
+*.session
+compact_state*
+wakeup*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Kaggle
+*.csv
+!submission_template.csv
+
+# Notebooks checkpoints
+.ipynb_checkpoints/
