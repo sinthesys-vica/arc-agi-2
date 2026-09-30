@@ -14,6 +14,7 @@ import numpy as np
 
 from .scene import Scene
 from .proposers import Hypothesis
+from .dsl import identity as _dsl_identity
 from .dsl import signature as _dsl_signature
 
 MAX_COLOR = 9
@@ -136,32 +137,16 @@ def _token_jaccard_distance(a: str, b: str) -> float:
     return 1.0 - len(ta & tb) / len(ta | tb)
 
 
-_IDENTITY_SIG: tuple = ("identity",)
-
-# Signatures that are semantically the identity transform.
-# (Canonical form lives here until dsl.py owns the semantics itself.)
-_IDENTITY_EQUIVALENTS = frozenset({
-    ("tile", 1, 1),
-    ("scale", 1, 1),
-    ("rotate", 0),
-})
-
-
-def _canonical_key(sig: tuple) -> tuple:
-    """Normalize semantically-identity signatures to the identity key."""
-    if sig == _IDENTITY_SIG or sig in _IDENTITY_EQUIVALENTS:
-        return _IDENTITY_SIG
-    return sig
+_IDENTITY_SIG: tuple = _dsl_signature(_dsl_identity)
 
 
 def _program_key_set(f) -> set[tuple] | None:
     """The semantic key set of a transform in the program space.
 
-    * compose() closures: the dsl.signature of each component, with no-op
-      decorations (tile(1,1), scale(1,1), rotate(0)) normalized to identity
-      and dropped as unit elements; a compose of only no-ops keys as
+    * compose() closures: the canonical dsl.signature of each component,
+      with identity unit elements dropped; a compose of only no-ops keys as
       {identity};
-    * other transforms carrying a dsl signature: {canonical signature};
+    * other transforms carrying a dsl signature: {signature};
     * otherwise None (not introspectable).
 
     Keys are signatures, never id(): two separately built instances of the
@@ -169,12 +154,12 @@ def _program_key_set(f) -> set[tuple] | None:
     """
     components = _compose_components(f)
     if components is not None:
-        keys = {_canonical_key(_dsl_signature(c)) for c in components}
+        keys = {_dsl_signature(component) for component in components}
         keys.discard(_IDENTITY_SIG)  # identity is the unit of composition
         return keys if keys else {_IDENTITY_SIG}
     sig = getattr(f, "_arc2_signature", None)
     if sig is not None:
-        return {_canonical_key(tuple(sig))}
+        return {_dsl_signature(f)}
     return None
 
 
