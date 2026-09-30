@@ -230,7 +230,100 @@ class CropProposer(Proposer):
         return [candidate]
 
 
+class LargestComponentProposer(Proposer):
+    """Select all maximum-area components and render their color histogram."""
+
+    tier = 1
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        candidates: list[Hypothesis] = []
+        for order in (
+            "left_to_right",
+            "right_to_left",
+            "top_to_bottom",
+            "bottom_to_top",
+        ):
+            for layout in ("rows", "columns"):
+                transform = dsl.largest_component_histogram(order, layout)
+                candidate = Hypothesis(
+                    transform,
+                    f"largest components {order.replace('_', ' ')} as {layout}",
+                    0.86,
+                    2,
+                    "largest-component",
+                )
+                if not _paired(inputs, outputs):
+                    candidates.append(candidate)
+                elif outputs is not None and _exact(transform, inputs, outputs):
+                    candidates.append(candidate)
+        return _deduplicate(candidates)
+
+
+class RoutedRibbonProposer(Proposer):
+    """Infer a singleton-anchored diagonal ribbon that routes around obstacles."""
+
+    tier = 1
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not inputs:
+            return []
+        anchor_colors = {
+            color
+            for color in inputs[0].colors
+            if inputs[0].color_counts[color] == 1
+            and color != inputs[0].background_color()
+        }
+        for scene in inputs[1:]:
+            anchor_colors &= {
+                color
+                for color in scene.colors
+                if scene.color_counts[color] == 1 and color != scene.background_color()
+            }
+
+        candidates: list[Hypothesis] = []
+        for anchor_color in sorted(anchor_colors):
+            for row_direction in (-1, 1):
+                for column_direction in (-1, 1):
+                    for width in (1, 2, 3):
+                        transform = dsl.routed_ribbon(
+                            anchor_color,
+                            row_direction,
+                            column_direction,
+                            width,
+                        )
+                        candidate = Hypothesis(
+                            transform,
+                            (
+                                f"routed ribbon color {anchor_color} "
+                                f"direction {row_direction},{column_direction} width {width}"
+                            ),
+                            0.82,
+                            3,
+                            "routed-ribbon",
+                        )
+                        if not _paired(inputs, outputs):
+                            candidates.append(candidate)
+                        elif outputs is not None and _exact(transform, inputs, outputs):
+                            candidates.append(candidate)
+        return _deduplicate(candidates)
+
+
 def default_proposers() -> list[Proposer]:
     """Return the deterministic baseline proposer set in search order."""
 
-    return [GeometricProposer(), ColorMapProposer(), ResizeProposer(), CropProposer()]
+    return [
+        GeometricProposer(),
+        ColorMapProposer(),
+        ResizeProposer(),
+        CropProposer(),
+        LargestComponentProposer(),
+        RoutedRibbonProposer(),
+    ]
