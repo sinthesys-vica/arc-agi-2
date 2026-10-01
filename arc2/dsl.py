@@ -1199,6 +1199,8 @@ def oriented_marker_lines(
         present = set(int(value) for value in np.unique(source)) - {bg}
         if not present or not present <= configured:
             raise ValueError("grid contains unconfigured marker colors")
+        if any(obj.size != 1 for obj in Scene(source).objects()):
+            raise ValueError("oriented lines require singleton marker components")
 
         vertical_claims: dict[int, int] = {}
         horizontal_claims: dict[int, int] = {}
@@ -1237,3 +1239,313 @@ def oriented_marker_lines(
         horizontal_overwrites,
         background,
     )
+
+
+def marker_column_bands(
+    terminal_color: int,
+    background: int | None = None,
+) -> Transform:
+    """Fill marker columns in vertical bands ending at each marker.
+
+    The terminal markers sit on the bottom edge and identify the active
+    columns.  In each active column, a marker colors the band from the cell
+    after the previous marker through itself.  Unrelated cells are preserved.
+    """
+
+    if terminal_color not in range(10):
+        raise ValueError("terminal color must be in [0, 9]")
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = Scene(source).background_color() if background is None else background
+        columns = [int(value) for value in np.flatnonzero(source[-1] == terminal_color)]
+        if not columns:
+            raise ValueError("marker bands require terminal markers on the bottom edge")
+
+        result = source.copy()
+        for column in columns:
+            marker_rows = [int(value) for value in np.flatnonzero(source[:, column] != bg)]
+            if not marker_rows or marker_rows[-1] != source.shape[0] - 1:
+                raise ValueError("each active column must end in a terminal marker")
+            start = 0
+            for row in marker_rows:
+                result[start:row + 1, column] = int(source[row, column])
+                start = row + 1
+            if start != source.shape[0]:
+                raise ValueError("marker bands do not cover the full column")
+        if np.array_equal(result, source):
+            raise ValueError("marker-band transform would be a no-op")
+        return result
+
+    return _decorate(transform, "marker_column_bands", terminal_color, background)
+
+
+def periodic_pattern_repair(hole_color: int) -> Transform:
+    """Repair holes from the unique smallest two-dimensional period.
+
+    Known cells vote by residue class.  Ambiguous or degenerate patterns fail
+    closed; only cells carrying ``hole_color`` may be changed.
+    """
+
+    if hole_color not in range(10):
+        raise ValueError("hole color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        holes = np.argwhere(source == hole_color)
+        if not len(holes):
+            raise ValueError("periodic repair requires at least one hole")
+        height, width = source.shape
+        candidates: list[tuple[tuple[int, int], np.ndarray]] = []
+
+        for row_period in range(2, height):
+            for column_period in range(2, width):
+                residues: dict[tuple[int, int], int] = {}
+                compatible = True
+                for row_value, column_value in np.argwhere(source != hole_color):
+                    row, column = int(row_value), int(column_value)
+                    key = (row % row_period, column % column_period)
+                    value = int(source[row, column])
+                    previous = residues.setdefault(key, value)
+                    if previous != value:
+                        compatible = False
+                        break
+                if not compatible or len(set(residues.values())) < 2:
+                    continue
+                if any(
+                    (int(row) % row_period, int(column) % column_period) not in residues
+                    for row, column in holes
+                ):
+                    continue
+
+                repaired = source.copy()
+                for row_value, column_value in holes:
+                    row, column = int(row_value), int(column_value)
+                    repaired[row, column] = residues[
+                        (row % row_period, column % column_period)
+                    ]
+                if np.array_equal(repaired, source):
+                    continue
+                score = (row_period * column_period, row_period + column_period)
+                candidates.append((score, repaired))
+
+        if not candidates:
+            raise ValueError("no non-degenerate periodic repair exists")
+        best_score = min(score for score, _ in candidates)
+        best = [candidate for score, candidate in candidates if score == best_score]
+        unique: list[np.ndarray] = []
+        for candidate in best:
+            if not any(np.array_equal(candidate, previous) for previous in unique):
+                unique.append(candidate)
+        if len(unique) != 1:
+            raise ValueError("periodic repair is ambiguous")
+        return unique[0]
+
+    return _decorate(transform, "periodic_pattern_repair", hole_color)
+
+
+def _separator_spans(length: int, separators: list[int]) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for separator in separators:
+        if start < separator:
+            spans.append((start, separator))
+        start = separator + 1
+    if start < length:
+        spans.append((start, length))
+    return spans
+
+
+def reflection_block_repair(background: int | None = None) -> Transform:
+    """Complete damaged 2x2 block quartets by horizontal/vertical reflection."""
+
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = Scene(source).background_color() if background is None else background
+        separator_rows = [
+            row for row in range(source.shape[0])
+            if np.all(source[row] == source[row, 0]) and int(source[row, 0]) != bg
+        ]
+        separator_columns = [
+            column for column in range(source.shape[1])
+            if np.all(source[:, column] == source[0, column])
+            and int(source[0, column]) != bg
+        ]
+        if not separator_rows or not separator_columns:
+            raise ValueError("block repair requires row and column separators")
+        row_spans = _separator_spans(source.shape[0], separator_rows)
+        column_spans = _separator_spans(source.shape[1], separator_columns)
+        repairs: list[tuple[int, int, np.ndarray]] = []
+
+        for row_index in range(len(row_spans) - 1):
+            for column_index in range(len(column_spans) - 1):
+                coordinates = [
+                    (row_index, column_index),
+                    (row_index, column_index + 1),
+                    (row_index + 1, column_index),
+                    (row_index + 1, column_index + 1),
+                ]
+                shapes = {
+                    (
+                        row_spans[row][1] - row_spans[row][0],
+                        column_spans[column][1] - column_spans[column][0],
+                    )
+                    for row, column in coordinates
+                }
+                if len(shapes) != 1:
+                    continue
+                tiles = {
+                    (row, column): source[
+                        row_spans[row][0]:row_spans[row][1],
+                        column_spans[column][0]:column_spans[column][1],
+                    ]
+                    for row, column in coordinates
+                }
+                occupied = [key for key, tile in tiles.items() if np.any(tile != bg)]
+                empty = [key for key, tile in tiles.items() if np.all(tile == bg)]
+                if len(occupied) != 3 or len(empty) != 1:
+                    continue
+
+                canonical: list[np.ndarray] = []
+                for row, column in occupied:
+                    tile = tiles[(row, column)]
+                    if row == row_index + 1:
+                        tile = np.flipud(tile)
+                    if column == column_index + 1:
+                        tile = np.fliplr(tile)
+                    canonical.append(tile)
+                if not all(np.array_equal(canonical[0], tile) for tile in canonical[1:]):
+                    continue
+
+                missing_row, missing_column = empty[0]
+                prediction = canonical[0]
+                if missing_row == row_index + 1:
+                    prediction = np.flipud(prediction)
+                if missing_column == column_index + 1:
+                    prediction = np.fliplr(prediction)
+                repairs.append((missing_row, missing_column, prediction.copy()))
+
+        if not repairs:
+            raise ValueError("no unique reflection-block repair found")
+        result = source.copy()
+        written: dict[tuple[int, int], np.ndarray] = {}
+        for row, column, prediction in repairs:
+            key = (row, column)
+            previous = written.get(key)
+            if previous is not None and not np.array_equal(previous, prediction):
+                raise ValueError("overlapping block repairs disagree")
+            written[key] = prediction
+        for (row, column), prediction in written.items():
+            r0, r1 = row_spans[row]
+            c0, c1 = column_spans[column]
+            if np.any(result[r0:r1, c0:c1] != bg):
+                raise ValueError("block repair would overwrite existing content")
+            result[r0:r1, c0:c1] = prediction
+        return result
+
+    return _decorate(transform, "reflection_block_repair", background)
+
+
+def unify_shape_colors(anomaly_color: int, background: int | None = None) -> Transform:
+    """Recolor anomalous objects from same-shape exemplars."""
+
+    if anomaly_color not in range(10):
+        raise ValueError("anomaly color must be in [0, 9]")
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        scene = Scene(source)
+        bg = scene.background_color() if background is None else background
+        if anomaly_color == bg:
+            raise ValueError("anomaly color may not be the background")
+        groups: dict[tuple[tuple[int, int], ...], list] = {}
+        for obj in scene.objects():
+            groups.setdefault(obj.normalized_cells(), []).append(obj)
+
+        result = source.copy()
+        changed = False
+        for objects in groups.values():
+            colors = {obj.color for obj in objects}
+            targets = colors - {anomaly_color}
+            if len(objects) < 2 or anomaly_color not in colors or len(targets) != 1:
+                continue
+            target = next(iter(targets))
+            for obj in objects:
+                if obj.color != anomaly_color:
+                    continue
+                for row, column in obj.cells:
+                    result[row, column] = target
+                changed = True
+        if not changed:
+            raise ValueError("no same-shape anomaly can be unified")
+        return result
+
+    return _decorate(transform, "unify_shape_colors", anomaly_color, background)
+
+
+def periodic_perimeter_segments(background: int | None = None) -> Transform:
+    """Repeat one boundary run as equal on/off segments around the perimeter."""
+
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = Scene(source).background_color() if background is None else background
+        height, width = source.shape
+        if height < 2 or width < 2:
+            raise ValueError("perimeter completion requires a two-dimensional grid")
+        perimeter = (
+            [(0, column) for column in range(width)]
+            + [(row, width - 1) for row in range(1, height)]
+            + [(height - 1, column) for column in range(width - 2, -1, -1)]
+            + [(row, 0) for row in range(height - 2, 0, -1)]
+        )
+        perimeter_set = set(perimeter)
+        if any(
+            int(source[row, column]) != bg and (row, column) not in perimeter_set
+            for row in range(height)
+            for column in range(width)
+        ):
+            raise ValueError("perimeter completion cannot move interior content")
+        active = [
+            index for index, (row, column) in enumerate(perimeter)
+            if int(source[row, column]) != bg
+        ]
+        if not active:
+            raise ValueError("perimeter completion requires one active run")
+        colors = {int(source[perimeter[index]]) for index in active}
+        if len(colors) != 1:
+            raise ValueError("perimeter run must have one color")
+        active_set = set(active)
+        starts = [
+            index for index in active
+            if (index - 1) % len(perimeter) not in active_set
+        ]
+        if len(starts) != 1:
+            raise ValueError("perimeter input must contain one circular run")
+        start = starts[0]
+        run_length = len(active)
+        expected = {(start + offset) % len(perimeter) for offset in range(run_length)}
+        if expected != active_set:
+            raise ValueError("perimeter foreground is not contiguous")
+        if len(perimeter) % (2 * run_length):
+            raise ValueError("perimeter cannot be tiled by equal on/off runs")
+
+        result = source.copy()
+        color = next(iter(colors))
+        for segment_start in range(start, start + len(perimeter), 2 * run_length):
+            for offset in range(run_length):
+                result[perimeter[(segment_start + offset) % len(perimeter)]] = color
+        if np.array_equal(result, source):
+            raise ValueError("perimeter completion would be a no-op")
+        return result
+
+    return _decorate(transform, "periodic_perimeter_segments", background)

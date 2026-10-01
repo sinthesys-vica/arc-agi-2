@@ -741,6 +741,132 @@ class OrientedMarkerLineProposer(Proposer):
         return _deduplicate(candidates)
 
 
+class WallpaperRepairProposer(Proposer):
+    """Repair marker-column bands or damaged periodic wallpaper."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+        if any(source.grid.shape != target.grid.shape for source, target in zip(inputs, outputs)):
+            return []
+
+        candidates: list[Hypothesis] = []
+        terminal_colors = set(int(value) for value in np.unique(inputs[0].grid[-1]))
+        for scene in inputs[1:]:
+            terminal_colors &= set(int(value) for value in np.unique(scene.grid[-1]))
+        terminal_colors -= {scene.background_color() for scene in inputs}
+        for terminal_color in sorted(terminal_colors):
+            transform = dsl.marker_column_bands(terminal_color)
+            candidate = Hypothesis(
+                transform,
+                f"fill marker-column bands ending in color {terminal_color}",
+                0.70,
+                4,
+                "wallpaper-repair",
+            )
+            if _exact(transform, inputs, outputs):
+                candidates.append(candidate)
+
+        changed_colors: set[int] | None = None
+        for source, target in zip(inputs, outputs):
+            mask = source.grid != target.grid
+            current = set(int(value) for value in np.unique(source.grid[mask]))
+            changed_colors = current if changed_colors is None else changed_colors & current
+        for hole_color in sorted(changed_colors or set()):
+            transform = dsl.periodic_pattern_repair(hole_color)
+            candidate = Hypothesis(
+                transform,
+                f"repair color {hole_color} from the smallest periodic wallpaper",
+                0.72,
+                5,
+                "wallpaper-repair",
+            )
+            if _exact(transform, inputs, outputs):
+                candidates.append(candidate)
+        return _deduplicate(candidates)
+
+
+class SymmetryCompleterProposer(Proposer):
+    """Complete reflected block quartets or periodic boundary symmetry."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        transforms = (
+            (
+                dsl.reflection_block_repair(),
+                "complete damaged 2x2 block quartets by reflection",
+                5,
+            ),
+            (
+                dsl.periodic_perimeter_segments(),
+                "repeat equal on/off segments around the perimeter",
+                4,
+            ),
+        )
+        candidates: list[Hypothesis] = []
+        for transform, description, complexity in transforms:
+            candidate = Hypothesis(
+                transform,
+                description,
+                0.70,
+                complexity,
+                "symmetry-completer",
+            )
+            if not _paired(inputs, outputs):
+                candidates.append(candidate)
+            elif outputs is not None and _exact(transform, inputs, outputs):
+                candidates.append(candidate)
+        return _deduplicate(candidates)
+
+
+class ShapeUnifierProposer(Proposer):
+    """Replace anomalous object colors from exact same-shape exemplars."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+        changed_colors: set[int] | None = None
+        for source, target in zip(inputs, outputs):
+            if source.grid.shape != target.grid.shape:
+                return []
+            mask = source.grid != target.grid
+            current = set(int(value) for value in np.unique(source.grid[mask]))
+            changed_colors = current if changed_colors is None else changed_colors & current
+
+        candidates: list[Hypothesis] = []
+        for anomaly_color in sorted(changed_colors or set()):
+            transform = dsl.unify_shape_colors(anomaly_color)
+            candidate = Hypothesis(
+                transform,
+                f"recolor anomalous color {anomaly_color} from same-shape exemplars",
+                0.72,
+                4,
+                "shape-unifier",
+            )
+            if _exact(transform, inputs, outputs):
+                candidates.append(candidate)
+        return _deduplicate(candidates)
+
+
 def default_proposers() -> list[Proposer]:
     """Return the deterministic baseline proposer set in search order."""
 
@@ -765,4 +891,7 @@ def default_proposers() -> list[Proposer]:
         MarkerFrameProposer(),
         PeriodicStripeProposer(),
         OrientedMarkerLineProposer(),
+        WallpaperRepairProposer(),
+        SymmetryCompleterProposer(),
+        ShapeUnifierProposer(),
     ]

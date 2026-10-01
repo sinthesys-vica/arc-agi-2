@@ -25,6 +25,9 @@ from arc2.proposers import (
     PartitionMaxCountProposer,
     PeriodicStripeProposer,
     OrientedMarkerLineProposer,
+    ShapeUnifierProposer,
+    SymmetryCompleterProposer,
+    WallpaperRepairProposer,
     ResizeProposer,
     RoutedRibbonProposer,
     default_proposers,
@@ -308,6 +311,81 @@ class DSLTests(unittest.TestCase):
             ],
         )
 
+    def test_oriented_marker_lines_rejects_non_singleton_components(self) -> None:
+        source = np.array([
+            [2, 2, 0],
+            [0, 0, 0],
+            [0, 0, 3],
+        ])
+        with self.assertRaises(ValueError):
+            dsl.oriented_marker_lines({2}, {3})(source)
+
+    def test_periodic_pattern_repair_fills_only_holes(self) -> None:
+        source = np.array([
+            [1, 2, 1, 2, 1, 2],
+            [3, 4, 3, 4, 3, 4],
+            [1, 2, 8, 2, 1, 2],
+            [3, 4, 3, 8, 3, 4],
+        ])
+        np.testing.assert_array_equal(dsl.periodic_pattern_repair(8)(source), [
+            [1, 2, 1, 2, 1, 2],
+            [3, 4, 3, 4, 3, 4],
+            [1, 2, 1, 2, 1, 2],
+            [3, 4, 3, 4, 3, 4],
+        ])
+
+    def test_periodic_pattern_repair_rejects_uniform_and_noise(self) -> None:
+        with self.assertRaises(ValueError):
+            dsl.periodic_pattern_repair(0)(np.array([
+                [1, 1, 1, 1],
+                [1, 0, 1, 1],
+                [1, 1, 1, 1],
+                [1, 1, 1, 1],
+            ]))
+        with self.assertRaises(ValueError):
+            dsl.periodic_pattern_repair(0)(np.array([
+                [1, 2, 3, 4],
+                [5, 0, 6, 7],
+                [8, 9, 1, 2],
+                [3, 4, 5, 6],
+            ]))
+
+    def test_reflection_block_repair_completes_one_quartet(self) -> None:
+        source = np.array([
+            [1, 0, 5, 0, 1],
+            [1, 1, 5, 1, 1],
+            [5, 5, 5, 5, 5],
+            [1, 1, 5, 0, 0],
+            [1, 0, 5, 0, 0],
+        ])
+        np.testing.assert_array_equal(dsl.reflection_block_repair(0)(source), [
+            [1, 0, 5, 0, 1],
+            [1, 1, 5, 1, 1],
+            [5, 5, 5, 5, 5],
+            [1, 1, 5, 1, 1],
+            [1, 0, 5, 0, 1],
+        ])
+
+    def test_shape_unifier_handles_multiple_twins(self) -> None:
+        source = np.array([
+            [1, 0, 7, 0, 7],
+            [1, 0, 7, 0, 7],
+        ])
+        np.testing.assert_array_equal(dsl.unify_shape_colors(1)(source), [
+            [7, 0, 7, 0, 7],
+            [7, 0, 7, 0, 7],
+        ])
+
+    def test_periodic_perimeter_segments_uses_nonzero_background(self) -> None:
+        source = np.full((4, 6), 8, dtype=int)
+        source[0, 0:2] = 3
+        np.testing.assert_array_equal(dsl.periodic_perimeter_segments()(source), [
+            [3, 3, 8, 8, 3, 3],
+            [8, 8, 8, 8, 8, 8],
+            [8, 8, 8, 8, 8, 8],
+            [3, 3, 8, 8, 3, 3],
+        ])
+
 
 class ProposerTests(unittest.TestCase):
     @staticmethod
@@ -446,6 +524,9 @@ class ProposerTests(unittest.TestCase):
         self.assertTrue(any(isinstance(p, MarkerFrameProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, PeriodicStripeProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, OrientedMarkerLineProposer) for p in defaults))
+        self.assertTrue(any(isinstance(p, WallpaperRepairProposer) for p in defaults))
+        self.assertTrue(any(isinstance(p, SymmetryCompleterProposer) for p in defaults))
+        self.assertTrue(any(isinstance(p, ShapeUnifierProposer) for p in defaults))
 
     def test_default_proposers_integrate_with_search(self) -> None:
         train = [{
