@@ -1921,3 +1921,302 @@ def duplicate_template_refine(
         reference_color,
         background,
     )
+
+
+def extend_diagonal_lattice(
+    marker_color: int,
+    fill_color: int,
+    background: int = 0,
+) -> Transform:
+    """Extend an equally spaced diagonal marker lattice toward its open end."""
+
+    if any(color not in range(10) for color in (marker_color, fill_color, background)):
+        raise ValueError("ARC colors must be in [0, 9]")
+    if len({marker_color, fill_color, background}) != 3:
+        raise ValueError("marker, fill, and background colors must differ")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        if source.shape[0] < 3 or source.shape[1] < 3:
+            return source.copy()
+        if set(int(value) for value in np.unique(source)) - {background, marker_color}:
+            return source.copy()
+        points = np.argwhere(source == marker_color)
+        if len(points) < 3:
+            return source.copy()
+
+        candidates: list[np.ndarray] = []
+        for column_sign in (1, -1):
+            diagonal = points[:, 0] - column_sign * points[:, 1]
+            if len(set(int(value) for value in diagonal)) != 1:
+                continue
+            ordered = points[np.argsort(points[:, 0])]
+            differences = np.diff(ordered, axis=0)
+            if not len(differences) or not np.all(differences == differences[0]):
+                continue
+            row_step, column_step = (int(value) for value in differences[0])
+            if row_step <= 0 or abs(column_step) != row_step:
+                continue
+
+            result = source.copy()
+            position = ordered[-1].copy() + differences[0]
+            changed = False
+            while (
+                0 <= position[0] < source.shape[0]
+                and 0 <= position[1] < source.shape[1]
+            ):
+                cell = tuple(int(value) for value in position)
+                if int(source[cell]) != background:
+                    changed = False
+                    break
+                result[cell] = fill_color
+                changed = True
+                position += differences[0]
+            if changed:
+                candidates.append(result)
+
+        if len(candidates) != 1:
+            return source.copy()
+        return candidates[0]
+
+    return _decorate(
+        transform,
+        "extend_diagonal_lattice",
+        marker_color,
+        fill_color,
+        background,
+    )
+
+
+def complete_solid_template(
+    fill_color: int,
+    background: int = 0,
+) -> Transform:
+    """Complete partial copies of a unique solid 3x3 template in the grid."""
+
+    if any(color not in range(10) for color in (fill_color, background)):
+        raise ValueError("ARC colors must be in [0, 9]")
+    if fill_color == background:
+        raise ValueError("fill and background colors must differ")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        height, width = source.shape
+        if height < 3 or width < 3:
+            return source.copy()
+
+        templates: list[np.ndarray] = []
+        for row in range(height - 2):
+            for column in range(width - 2):
+                window = source[row:row + 3, column:column + 3]
+                if np.all(window != background) and np.any(window == fill_color):
+                    if not any(np.array_equal(window, item) for item in templates):
+                        templates.append(window.copy())
+        if len(templates) != 1:
+            return source.copy()
+        template = templates[0]
+        fill_mask = template == fill_color
+        if np.all(fill_mask):
+            return source.copy()
+
+        proposals: dict[tuple[int, int], int] = {}
+        for row in range(height - 2):
+            for column in range(width - 2):
+                window = source[row:row + 3, column:column + 3]
+                if not np.all(window[~fill_mask] == template[~fill_mask]):
+                    continue
+                if not np.all((window[fill_mask] == fill_color) | (window[fill_mask] == background)):
+                    continue
+                missing = np.argwhere(fill_mask & (window == background))
+                for local_row, local_column in missing:
+                    proposals[(row + int(local_row), column + int(local_column))] = fill_color
+
+        if not proposals:
+            return source.copy()
+        result = source.copy()
+        for cell, color in proposals.items():
+            result[cell] = color
+        return result
+
+    return _decorate(transform, "complete_solid_template", fill_color, background)
+
+
+def complete_d4_orbits(background: int = 0) -> Transform:
+    """Fill missing cells in same-color D4 orbits inside a square pattern."""
+
+    if background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        points = np.argwhere(source != background)
+        if not len(points):
+            return source.copy()
+        top, left = (int(value) for value in points.min(axis=0))
+        bottom, right = (int(value) for value in points.max(axis=0))
+        if bottom - top != right - left or (bottom - top) % 2:
+            return source.copy()
+        center_row, center_column = (top + bottom) // 2, (left + right) // 2
+        if int(source[center_row, center_column]) == background:
+            return source.copy()
+
+        result = source.copy()
+        seen: set[tuple[tuple[int, int], ...]] = set()
+        changed = False
+        for row, column in (tuple(int(value) for value in point) for point in points):
+            dr, dc = row - center_row, column - center_column
+            orbit = {
+                (center_row + dr, center_column + dc),
+                (center_row + dr, center_column - dc),
+                (center_row - dr, center_column + dc),
+                (center_row - dr, center_column - dc),
+                (center_row + dc, center_column + dr),
+                (center_row + dc, center_column - dr),
+                (center_row - dc, center_column + dr),
+                (center_row - dc, center_column - dr),
+            }
+            key = tuple(sorted(orbit))
+            if key in seen:
+                continue
+            seen.add(key)
+            colors = {
+                int(source[cell])
+                for cell in orbit
+                if int(source[cell]) != background
+            }
+            if len(colors) != 1:
+                return source.copy()
+            color = next(iter(colors))
+            for cell in orbit:
+                if int(result[cell]) == background:
+                    result[cell] = color
+                    changed = True
+        return result if changed else source.copy()
+
+    return _decorate(transform, "complete_d4_orbits", background)
+
+
+def mode_below_separator(background: int = 0) -> Transform:
+    """Place the unique modal upper color below a full separator row."""
+
+    if background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        height, width = source.shape
+        if height < 3 or width < 3 or width % 2 == 0:
+            return source.copy()
+        separators: list[int] = []
+        for row in range(1, height - 1):
+            values = set(int(value) for value in source[row])
+            if len(values) == 1 and next(iter(values)) != background:
+                separators.append(row)
+        if len(separators) != 1:
+            return source.copy()
+        separator_row = separators[0]
+        separator_color = int(source[separator_row, 0])
+        if np.any(source[separator_row + 1:] != background):
+            return source.copy()
+        if np.any(source[:separator_row] == background):
+            return source.copy()
+        values = [
+            int(value)
+            for value in source[:separator_row].flat
+            if int(value) not in (background, separator_color)
+        ]
+        counts = Counter(values).most_common()
+        if not counts or (len(counts) > 1 and counts[0][1] == counts[1][1]):
+            return source.copy()
+        result = source.copy()
+        result[height - 1, width // 2] = counts[0][0]
+        return result
+
+    return _decorate(transform, "mode_below_separator", background)
+
+
+def complete_local_symmetric_templates(background: int = 0) -> Transform:
+    """Propagate isolated centered 3x3 symmetric motifs to partial copies."""
+
+    if background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+    masks = (
+        frozenset({(0, -1), (0, 1)}),
+        frozenset({(-1, 0), (1, 0)}),
+        frozenset({(-1, 0), (1, 0), (0, -1), (0, 1)}),
+        frozenset({(-1, -1), (-1, 1), (1, -1), (1, 1)}),
+    )
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        height, width = source.shape
+        if height < 3 or width < 3:
+            return source.copy()
+
+        prototypes: list[tuple[int, int, frozenset[tuple[int, int]]]] = []
+        for row in range(1, height - 1):
+            for column in range(1, width - 1):
+                center = int(source[row, column])
+                if center == background:
+                    continue
+                for offsets in masks:
+                    support_values = [
+                        int(source[row + dr, column + dc]) for dr, dc in offsets
+                    ]
+                    if len(set(support_values)) != 1:
+                        continue
+                    support = support_values[0]
+                    if support in (background, center):
+                        continue
+                    used = {(0, 0), *offsets}
+                    isolated = all(
+                        int(source[row + dr, column + dc]) == background
+                        for dr in (-1, 0, 1)
+                        for dc in (-1, 0, 1)
+                        if (dr, dc) not in used
+                    )
+                    prototype = (center, support, offsets)
+                    if isolated and prototype not in prototypes:
+                        prototypes.append(prototype)
+        if not prototypes:
+            return source.copy()
+
+        proposals: dict[tuple[int, int], set[int]] = {}
+        for center, support, offsets in prototypes:
+            for row in range(1, height - 1):
+                for column in range(1, width - 1):
+                    center_value = int(source[row, column])
+                    if center_value not in (background, center):
+                        continue
+                    support_values = {
+                        offset: int(source[row + offset[0], column + offset[1]])
+                        for offset in offsets
+                    }
+                    if any(value not in (background, support) for value in support_values.values()):
+                        continue
+                    used = {(0, 0), *offsets}
+                    if any(
+                        int(source[row + dr, column + dc]) != background
+                        for dr in (-1, 0, 1)
+                        for dc in (-1, 0, 1)
+                        if (dr, dc) not in used
+                    ):
+                        continue
+                    center_present = center_value == center
+                    complete_support = all(value == support for value in support_values.values())
+                    if not center_present and not complete_support:
+                        continue
+                    if center_value == background:
+                        proposals.setdefault((row, column), set()).add(center)
+                    for (dr, dc), value in support_values.items():
+                        if value == background:
+                            proposals.setdefault((row + dr, column + dc), set()).add(support)
+
+        if not proposals or any(len(colors) != 1 for colors in proposals.values()):
+            return source.copy()
+        result = source.copy()
+        for cell, colors in proposals.items():
+            result[cell] = next(iter(colors))
+        return result
+
+    return _decorate(transform, "complete_local_symmetric_templates", background)

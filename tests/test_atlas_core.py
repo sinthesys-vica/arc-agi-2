@@ -13,6 +13,7 @@ from arc2.proposers import (
     ClosestHorizontalPairProposer,
     ColorMapProposer,
     D4OrbitProposer,
+    FillFromBackgroundProposer,
     FractalProposer,
     GeometricProposer,
     LargestComponentProposer,
@@ -446,6 +447,84 @@ class DSLTests(unittest.TestCase):
         self.assertTrue(np.all(actual[5:9, 1:3] == 0))
         self.assertEqual(int(actual[3, 2]), 7)
 
+    def test_extend_diagonal_lattice_fills_open_tail(self) -> None:
+        source = np.zeros((9, 9), dtype=int)
+        source[0, 0] = source[2, 2] = source[4, 4] = 1
+        actual = dsl.extend_diagonal_lattice(1, 3)(source)
+        expected = source.copy()
+        expected[6, 6] = expected[8, 8] = 3
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_complete_solid_template_fills_only_template_slots(self) -> None:
+        source = np.array([
+            [1, 4, 1, 0, 1, 0, 1],
+            [4, 8, 4, 0, 0, 8, 0],
+            [1, 4, 1, 0, 1, 0, 1],
+        ])
+        actual = dsl.complete_solid_template(4)(source)
+        expected = source.copy()
+        expected[:, 4:7] = np.array([[1, 4, 1], [4, 8, 4], [1, 4, 1]])
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_complete_d4_orbits_fills_partial_corner_orbit(self) -> None:
+        source = np.zeros((5, 5), dtype=int)
+        source[2, 2] = 3
+        source[0, 2] = source[2, 0] = source[2, 4] = source[4, 2] = 1
+        source[0, 0] = 2
+        actual = dsl.complete_d4_orbits()(source)
+        expected = source.copy()
+        expected[0, 4] = expected[4, 0] = expected[4, 4] = 2
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_mode_below_separator_places_unique_mode_at_bottom_center(self) -> None:
+        source = np.array([
+            [2, 2, 3, 2, 4],
+            [4, 2, 3, 2, 1],
+            [5, 5, 5, 5, 5],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0],
+        ])
+        actual = dsl.mode_below_separator()(source)
+        expected = source.copy()
+        expected[4, 2] = 2
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_complete_local_symmetric_templates_propagates_motif(self) -> None:
+        source = np.zeros((7, 7), dtype=int)
+        source[1, 1:4] = [4, 8, 4]
+        source[4, 4] = 8
+        actual = dsl.complete_local_symmetric_templates()(source)
+        expected = source.copy()
+        expected[4, 3] = expected[4, 5] = 4
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_fill_from_background_primitives_fail_closed_on_noise(self) -> None:
+        ambiguous = np.array([[1, 0, 2], [0, 0, 0], [0, 0, 0]])
+        empty_context = np.zeros((5, 5), dtype=int)
+        border_marker = np.array([[8, 0, 0], [0, 0, 0], [0, 0, 0]])
+        dense = np.array([[1, 2, 3], [4, 0, 6], [7, 8, 9]])
+        off_lattice = np.zeros((7, 7), dtype=int)
+        off_lattice[0, 0] = off_lattice[2, 2] = off_lattice[4, 5] = 1
+        degenerate = np.array([[0, 1, 0, 1, 0]])
+        cases = (
+            (dsl.extend_diagonal_lattice(1, 3), off_lattice),
+            (dsl.complete_solid_template(4), ambiguous),
+            (dsl.complete_d4_orbits(), ambiguous),
+            (dsl.mode_below_separator(), border_marker),
+            (dsl.complete_local_symmetric_templates(), dense),
+        )
+        for transform, source in cases:
+            np.testing.assert_array_equal(transform(source), source)
+        for transform in (
+            dsl.extend_diagonal_lattice(1, 3),
+            dsl.complete_solid_template(4),
+            dsl.complete_d4_orbits(),
+            dsl.mode_below_separator(),
+            dsl.complete_local_symmetric_templates(),
+        ):
+            np.testing.assert_array_equal(transform(empty_context), empty_context)
+            np.testing.assert_array_equal(transform(degenerate), degenerate)
+
 
 class ProposerTests(unittest.TestCase):
     @staticmethod
@@ -588,6 +667,7 @@ class ProposerTests(unittest.TestCase):
         self.assertTrue(any(isinstance(p, SymmetryCompleterProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, ShapeUnifierProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, SparseSymmetryRepairProposer) for p in defaults))
+        self.assertTrue(any(isinstance(p, FillFromBackgroundProposer) for p in defaults))
 
     def test_default_proposers_integrate_with_search(self) -> None:
         train = [{

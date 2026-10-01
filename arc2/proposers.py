@@ -956,6 +956,83 @@ class SparseSymmetryRepairProposer(Proposer):
         return _deduplicate(candidates)
 
 
+class FillFromBackgroundProposer(Proposer):
+    """Complete contextual patterns by changing background cells only."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+
+        changed_targets: set[int] | None = None
+        for source, target in zip(inputs, outputs):
+            if source.grid.shape != target.grid.shape:
+                return []
+            changed = source.grid != target.grid
+            if not np.any(changed) or np.any(source.grid[changed] != 0):
+                return []
+            colors = set(int(value) for value in np.unique(target.grid[changed]))
+            changed_targets = colors if changed_targets is None else changed_targets & colors
+
+        candidates: list[Hypothesis] = []
+        fixed = (
+            (
+                dsl.complete_d4_orbits(0),
+                "complete missing cells in same-color D4 orbits",
+                4,
+                "d4-orbit-fill",
+            ),
+            (
+                dsl.mode_below_separator(0),
+                "place the modal upper color below a full separator",
+                3,
+                "separator-mode-fill",
+            ),
+            (
+                dsl.complete_local_symmetric_templates(0),
+                "complete isolated local symmetric template copies",
+                6,
+                "local-template-fill",
+            ),
+        )
+        for transform, description, complexity, family in fixed:
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(transform, description, 0.75, complexity, family))
+
+        shared_colors = set(int(value) for value in np.unique(inputs[0].grid))
+        for scene in inputs[1:]:
+            shared_colors &= set(int(value) for value in np.unique(scene.grid))
+        marker_colors = shared_colors - {0}
+        for fill_color in sorted(changed_targets or set()):
+            for marker_color in sorted(marker_colors - {fill_color}):
+                transform = dsl.extend_diagonal_lattice(marker_color, fill_color, 0)
+                if _exact(transform, inputs, outputs):
+                    candidates.append(Hypothesis(
+                        transform,
+                        f"extend diagonal marker {marker_color} lattice with {fill_color}",
+                        0.78,
+                        4,
+                        "diagonal-lattice-fill",
+                    ))
+
+            transform = dsl.complete_solid_template(fill_color, 0)
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(
+                    transform,
+                    f"complete partial solid templates with color {fill_color}",
+                    0.76,
+                    5,
+                    "solid-template-fill",
+                ))
+        return _deduplicate(candidates)
+
+
 def default_proposers() -> list[Proposer]:
     """Return the deterministic baseline proposer set in search order."""
 
@@ -984,4 +1061,5 @@ def default_proposers() -> list[Proposer]:
         SymmetryCompleterProposer(),
         ShapeUnifierProposer(),
         SparseSymmetryRepairProposer(),
+        FillFromBackgroundProposer(),
     ]
