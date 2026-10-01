@@ -1033,6 +1033,103 @@ class FillFromBackgroundProposer(Proposer):
         return _deduplicate(candidates)
 
 
+class FixedSmallOutputProposer(Proposer):
+    """Extract compact classifications, position maps, and count summaries."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+        shapes = {tuple(output.grid.shape) for output in outputs}
+        if len(shapes) != 1:
+            return []
+        shape = next(iter(shapes))
+        if shape[0] not in range(1, 4) or shape[1] not in range(1, 4):
+            return []
+
+        candidates: list[Hypothesis] = []
+        if shape == (1, 1):
+            transform = dsl.extract_full_span_color()
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(
+                    transform,
+                    "classify by the unique uninterrupted full-span color",
+                    0.79,
+                    3,
+                    "full-span-classifier",
+                ))
+
+        if shape == (2, 2):
+            transform = dsl.quadrant_object_map()
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(
+                    transform,
+                    "map embedded 2x2 objects to canvas quadrants",
+                    0.78,
+                    5,
+                    "quadrant-object-map",
+                ))
+
+        output_colors = sorted({
+            int(value)
+            for output in outputs
+            for value in np.unique(output.grid)
+        })
+        if shape == (3, 3):
+            for output_background in output_colors:
+                for output_color in output_colors:
+                    if output_color == output_background:
+                        continue
+                    transforms = (
+                        (
+                            dsl.encode_cell_count_3x3(output_color, output_background),
+                            "encode foreground-cell count on the top-and-center path",
+                            4,
+                            "cell-count-code",
+                        ),
+                        (
+                            dsl.encode_square_component_count_3x3(
+                                output_color,
+                                output_background,
+                            ),
+                            "encode solid 2x2 component count on a five-cell path",
+                            5,
+                            "square-component-code",
+                        ),
+                    )
+                    for transform, description, complexity, family in transforms:
+                        if _exact(transform, inputs, outputs):
+                            candidates.append(Hypothesis(
+                                transform,
+                                description,
+                                0.77,
+                                complexity,
+                                family,
+                            ))
+
+        for output_background in output_colors:
+            transform = dsl.component_segment_histogram(
+                shape[0],
+                shape[1],
+                output_background,
+            )
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(
+                    transform,
+                    "pack colors by descending horizontal-segment counts",
+                    0.76,
+                    5,
+                    "segment-count-histogram",
+                ))
+        return _deduplicate(candidates)
+
+
 def default_proposers() -> list[Proposer]:
     """Return the deterministic baseline proposer set in search order."""
 
@@ -1062,4 +1159,5 @@ def default_proposers() -> list[Proposer]:
         ShapeUnifierProposer(),
         SparseSymmetryRepairProposer(),
         FillFromBackgroundProposer(),
+        FixedSmallOutputProposer(),
     ]

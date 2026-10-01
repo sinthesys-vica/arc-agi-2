@@ -2220,3 +2220,203 @@ def complete_local_symmetric_templates(background: int = 0) -> Transform:
         return result
 
     return _decorate(transform, "complete_local_symmetric_templates", background)
+
+
+def extract_full_span_color() -> Transform:
+    """Return the unique color forming an uninterrupted full row or column."""
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        if source.shape[0] < 3 or source.shape[1] < 3 or len(np.unique(source)) < 2:
+            raise ValueError("a non-degenerate multi-color grid is required")
+        background = Scene(source).background_color()
+        colors: set[int] = set()
+        for line in (*source, *source.T):
+            values = set(int(value) for value in line)
+            if len(values) == 1:
+                color = next(iter(values))
+                if color != background:
+                    colors.add(color)
+        if len(colors) != 1:
+            raise ValueError("full-span color is absent or ambiguous")
+        return np.asarray([[next(iter(colors))]], dtype=int)
+
+    return _decorate(transform, "extract_full_span_color")
+
+
+def quadrant_object_map() -> Transform:
+    """Map isolated 2x2 objects inside a field to their 2x2 quadrants."""
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        height, width = source.shape
+        if height < 4 or width < 4:
+            raise ValueError("quadrant extraction requires a larger grid")
+        border = np.concatenate((source[0], source[-1], source[:, 0], source[:, -1]))
+        border_counts = Counter(int(value) for value in border)
+        outer, outer_count = border_counts.most_common(1)[0]
+        if len(border_counts) > 1 and outer_count == border_counts.most_common(2)[1][1]:
+            raise ValueError("outer background is ambiguous")
+
+        field_cells = np.argwhere(source != outer)
+        if not len(field_cells):
+            raise ValueError("field is absent")
+        top, left = (int(value) for value in field_cells.min(axis=0))
+        bottom, right = (int(value) for value in field_cells.max(axis=0))
+        inside = source[top:bottom + 1, left:right + 1]
+        if np.any(inside == outer):
+            raise ValueError("field rectangle contains outer-background holes")
+        field_counts = Counter(int(value) for value in inside.flat)
+        field, field_count = field_counts.most_common(1)[0]
+        if len(field_counts) > 1 and field_count == field_counts.most_common(2)[1][1]:
+            raise ValueError("field background is ambiguous")
+
+        scene = Scene(source)
+        result = np.full((2, 2), outer, dtype=int)
+        object_count = 0
+        row_midpoint = (top + bottom) / 2
+        column_midpoint = (left + right) / 2
+        for color in sorted(field_counts):
+            if color == field:
+                continue
+            for obj in scene.components(color=color):
+                if obj.size != 4 or obj.bbox.height != 2 or obj.bbox.width != 2:
+                    raise ValueError("every mapped object must be a solid 2x2 block")
+                if any(int(source[cell]) != color for cell in obj.cells):
+                    raise ValueError("object is not solid")
+                center_row = (obj.bbox.r0 + obj.bbox.r1) / 2
+                center_column = (obj.bbox.c0 + obj.bbox.c1) / 2
+                if center_row == row_midpoint or center_column == column_midpoint:
+                    raise ValueError("object lies on a quadrant boundary")
+                target = (
+                    0 if center_row < row_midpoint else 1,
+                    0 if center_column < column_midpoint else 1,
+                )
+                if int(result[target]) != outer:
+                    raise ValueError("multiple objects occupy one quadrant")
+                result[target] = color
+                object_count += 1
+        if not object_count:
+            raise ValueError("no quadrant objects found")
+        return result
+
+    return _decorate(transform, "quadrant_object_map")
+
+
+def encode_cell_count_3x3(
+    output_color: int,
+    output_background: int = 0,
+) -> Transform:
+    """Encode one to four foreground cells along a fixed 3x3 count path."""
+
+    if any(color not in range(10) for color in (output_color, output_background)):
+        raise ValueError("ARC colors must be in [0, 9]")
+    if output_color == output_background:
+        raise ValueError("output and background colors must differ")
+    order = ((0, 0), (0, 1), (0, 2), (1, 1))
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        if source.shape != (3, 3):
+            raise ValueError("cell-count encoding requires a 3x3 input")
+        background = Scene(source).background_color()
+        foreground = source[source != background]
+        if not len(foreground) or len(set(int(value) for value in foreground)) != 1:
+            raise ValueError("exactly one foreground color is required")
+        count = int(len(foreground))
+        if count > len(order):
+            raise ValueError("foreground count exceeds the encoding capacity")
+        result = np.full((3, 3), output_background, dtype=int)
+        for cell in order[:count]:
+            result[cell] = output_color
+        return result
+
+    return _decorate(transform, "encode_cell_count_3x3", output_color, output_background)
+
+
+def encode_square_component_count_3x3(
+    output_color: int,
+    output_background: int = 0,
+) -> Transform:
+    """Count isolated solid 2x2 components into a five-position 3x3 code."""
+
+    if any(color not in range(10) for color in (output_color, output_background)):
+        raise ValueError("ARC colors must be in [0, 9]")
+    if output_color == output_background:
+        raise ValueError("output and background colors must differ")
+    order = ((0, 0), (0, 2), (1, 1), (2, 0), (2, 2))
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        if source.shape == (1, 1):
+            raise ValueError("degenerate input")
+        scene = Scene(source)
+        background = scene.background_color()
+        colors = [int(value) for value in np.unique(source) if int(value) != background]
+        if len(colors) != 1:
+            raise ValueError("exactly one object color is required")
+        components = scene.components(color=colors[0])
+        if not 1 <= len(components) <= len(order):
+            raise ValueError("component count exceeds the encoding capacity")
+        for obj in components:
+            if obj.size != 4 or obj.bbox.height != 2 or obj.bbox.width != 2:
+                raise ValueError("every component must be a solid 2x2 block")
+            if any(int(source[cell]) != colors[0] for cell in obj.cells):
+                raise ValueError("component is not solid")
+        result = np.full((3, 3), output_background, dtype=int)
+        for cell in order[:len(components)]:
+            result[cell] = output_color
+        return result
+
+    return _decorate(
+        transform,
+        "encode_square_component_count_3x3",
+        output_color,
+        output_background,
+    )
+
+
+def component_segment_histogram(
+    rows: int,
+    columns: int,
+    output_background: int = 0,
+) -> Transform:
+    """Pack descending colors repeated by their horizontal segment counts."""
+
+    if rows < 1 or columns < 1:
+        raise ValueError("histogram dimensions must be positive")
+    if output_background not in range(10):
+        raise ValueError("output background must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        if source.shape == (1, 1):
+            raise ValueError("degenerate input")
+        scene = Scene(source)
+        background = scene.background_color()
+        colors = sorted(
+            (int(value) for value in np.unique(source) if int(value) != background),
+            reverse=True,
+        )
+        if not colors:
+            raise ValueError("segments are absent")
+        encoded: list[int] = []
+        for color in colors:
+            components = scene.components(color=color)
+            for obj in components:
+                if obj.bbox.height != 1:
+                    raise ValueError("every component must be a horizontal segment")
+            encoded.extend([color] * len(components))
+        capacity = rows * columns
+        if len(encoded) > capacity:
+            raise ValueError("segment count exceeds the histogram capacity")
+        encoded.extend([output_background] * (capacity - len(encoded)))
+        return np.asarray(encoded, dtype=int).reshape(rows, columns)
+
+    return _decorate(
+        transform,
+        "component_segment_histogram",
+        rows,
+        columns,
+        output_background,
+    )

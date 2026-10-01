@@ -14,6 +14,7 @@ from arc2.proposers import (
     ColorMapProposer,
     D4OrbitProposer,
     FillFromBackgroundProposer,
+    FixedSmallOutputProposer,
     FractalProposer,
     GeometricProposer,
     LargestComponentProposer,
@@ -525,6 +526,43 @@ class DSLTests(unittest.TestCase):
             np.testing.assert_array_equal(transform(empty_context), empty_context)
             np.testing.assert_array_equal(transform(degenerate), degenerate)
 
+    def test_extract_full_span_color_finds_uninterrupted_bar(self) -> None:
+        source = np.array([[0, 2, 0], [3, 2, 3], [0, 2, 0]])
+        np.testing.assert_array_equal(dsl.extract_full_span_color()(source), [[2]])
+
+    def test_quadrant_object_map_extracts_canvas_positions(self) -> None:
+        source = np.zeros((8, 8), dtype=int)
+        source[1:7, 1:7] = 8
+        source[2:4, 2:4] = 3
+        source[4:6, 4:6] = 5
+        expected = np.array([[3, 0], [0, 5]])
+        np.testing.assert_array_equal(dsl.quadrant_object_map()(source), expected)
+
+    def test_encode_cell_count_3x3_uses_top_then_center(self) -> None:
+        source = np.array([[1, 0, 1], [0, 0, 0], [1, 0, 1]])
+        expected = np.array([[2, 2, 2], [0, 2, 0], [0, 0, 0]])
+        np.testing.assert_array_equal(dsl.encode_cell_count_3x3(2)(source), expected)
+
+    def test_encode_square_component_count_3x3_counts_blocks(self) -> None:
+        source = np.zeros((6, 6), dtype=int)
+        source[0:2, 0:2] = 4
+        source[3:5, 3:5] = 4
+        expected = np.array([[1, 0, 1], [0, 0, 0], [0, 0, 0]])
+        np.testing.assert_array_equal(
+            dsl.encode_square_component_count_3x3(1)(source),
+            expected,
+        )
+
+    def test_component_segment_histogram_handles_nonzero_background(self) -> None:
+        source = np.full((6, 8), 8, dtype=int)
+        source[0, 0:2] = source[2, 4:7] = source[5, 1:3] = 3
+        source[1, 5:7] = source[4, 0:4] = 2
+        expected = np.array([[3, 3, 3], [2, 2, 0]])
+        np.testing.assert_array_equal(
+            dsl.component_segment_histogram(2, 3)(source),
+            expected,
+        )
+
 
 class ProposerTests(unittest.TestCase):
     @staticmethod
@@ -668,6 +706,7 @@ class ProposerTests(unittest.TestCase):
         self.assertTrue(any(isinstance(p, ShapeUnifierProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, SparseSymmetryRepairProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, FillFromBackgroundProposer) for p in defaults))
+        self.assertTrue(any(isinstance(p, FixedSmallOutputProposer) for p in defaults))
 
     def test_default_proposers_integrate_with_search(self) -> None:
         train = [{
