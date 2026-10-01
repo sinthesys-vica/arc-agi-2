@@ -13,6 +13,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import numpy as np
+from scipy import ndimage
 
 from .scene import Scene
 
@@ -818,6 +819,151 @@ def diagonal_shift(axis: str, shift: int) -> Transform:
         return result
 
     return _decorate(transform, "diagonal_shift", axis, shift)
+
+
+def component_bbox_crop(
+    mode: str,
+    connectivity: int,
+    rule: str,
+    background: int | None = None,
+) -> Transform:
+    """Crop the original grid to one structurally selected component bbox."""
+
+    modes = {"foreground", "per_color"}
+    rules = {
+        "largest",
+        "smallest",
+        "most_colors",
+        "unique_color",
+        "unique_pattern",
+        "bottommost",
+        "topmost",
+        "leftmost",
+        "rightmost",
+    }
+    if mode not in modes:
+        raise ValueError(f"mode must be one of {sorted(modes)}")
+    if connectivity not in (4, 8):
+        raise ValueError("connectivity must be 4 or 8")
+    if rule not in rules:
+        raise ValueError(f"rule must be one of {sorted(rules)}")
+    if mode == "per_color" and rule == "most_colors":
+        raise ValueError("most_colors is defined only for foreground components")
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    structure = None if connectivity == 4 else np.ones((3, 3), dtype=int)
+
+    def extract_components(source: np.ndarray, bg: int) -> list[dict[str, Any]]:
+        components: list[dict[str, Any]] = []
+        masks: list[tuple[int | None, np.ndarray]]
+        if mode == "foreground":
+            masks = [(None, source != bg)]
+        else:
+            masks = [
+                (color, source == color)
+                for color in sorted(set(int(value) for value in source.flat) - {bg})
+            ]
+
+        for component_color, mask in masks:
+            labels, count = ndimage.label(mask, structure=structure)
+            for label_id in range(1, count + 1):
+                rows, columns = np.nonzero(labels == label_id)
+                if not len(rows):
+                    continue
+                row_min, row_max = int(rows.min()), int(rows.max())
+                col_min, col_max = int(columns.min()), int(columns.max())
+                component_colors = set(
+                    int(value) for value in source[labels == label_id]
+                )
+                bbox_colors = set(
+                    int(value)
+                    for value in source[row_min:row_max + 1, col_min:col_max + 1].flat
+                )
+                bbox_pattern = tuple(
+                    tuple(int(value) for value in row)
+                    for row in source[row_min:row_max + 1, col_min:col_max + 1]
+                )
+                components.append({
+                    "count": int(len(rows)),
+                    "bbox": (row_min, col_min, row_max, col_max),
+                    "component_colors": component_colors,
+                    "bbox_color_count": len(bbox_colors),
+                    "bbox_pattern": bbox_pattern,
+                    "component_color": component_color,
+                })
+        return components
+
+    def select_component(components: list[dict[str, Any]]) -> dict[str, Any]:
+        if not components:
+            raise ValueError("no foreground components")
+        if rule == "largest":
+            return max(components, key=lambda item: item["count"])
+        if rule == "smallest":
+            return min(components, key=lambda item: item["count"])
+        if rule == "most_colors":
+            return max(components, key=lambda item: item["bbox_color_count"])
+        if rule == "bottommost":
+            return max(components, key=lambda item: item["bbox"][0])
+        if rule == "topmost":
+            return min(components, key=lambda item: item["bbox"][0])
+        if rule == "leftmost":
+            return min(components, key=lambda item: item["bbox"][1])
+        if rule == "rightmost":
+            return max(components, key=lambda item: item["bbox"][1])
+
+        if rule == "unique_pattern":
+            frequency = Counter(item["bbox_pattern"] for item in components)
+            qualifying = [
+                item
+                for item in components
+                if frequency[item["bbox_pattern"]] == 1
+            ]
+            if not qualifying:
+                raise ValueError("no unique component pattern")
+            return max(qualifying, key=lambda item: item["count"])
+
+        if mode == "foreground":
+            frequency = Counter(
+                color
+                for item in components
+                for color in item["component_colors"]
+            )
+            qualifying = [
+                item
+                for item in components
+                if any(frequency[color] == 1 for color in item["component_colors"])
+            ]
+        else:
+            frequency = Counter(item["component_color"] for item in components)
+            qualifying = [
+                item
+                for item in components
+                if frequency[item["component_color"]] == 1
+            ]
+        if len(qualifying) != 1:
+            raise ValueError("unique-color component is ambiguous")
+        return qualifying[0]
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = (
+            Counter(int(value) for value in source.flat).most_common(1)[0][0]
+            if background is None
+            else background
+        )
+        selected = select_component(extract_components(source, bg))
+        row_min, col_min, row_max, col_max = selected["bbox"]
+        return source[row_min:row_max + 1, col_min:col_max + 1].copy()
+
+    return _decorate(
+        transform,
+        "component_bbox_crop",
+        mode,
+        connectivity,
+        rule,
+        background,
+    )
 
 
 def block_analogy(background: int | None = None) -> Transform:

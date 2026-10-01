@@ -12,6 +12,7 @@ from arc2.proposers import (
     AxialCrossProposer,
     ClosestHorizontalPairProposer,
     ColorMapProposer,
+    ComponentBBoxProposer,
     D4OrbitProposer,
     FillFromBackgroundProposer,
     FixedSmallOutputProposer,
@@ -686,6 +687,23 @@ class DSLTests(unittest.TestCase):
             shifted,
         )
 
+    def test_component_bbox_crop_uses_original_grid(self) -> None:
+        source = np.array([
+            [0, 2, 0, 0, 0, 0],
+            [2, 0, 2, 0, 5, 5],
+            [0, 2, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0],
+        ])
+        expected = np.array([
+            [0, 2, 0],
+            [2, 0, 2],
+            [0, 2, 0],
+        ])
+        np.testing.assert_array_equal(
+            dsl.component_bbox_crop("foreground", 8, "largest")(source),
+            expected,
+        )
+
 
 class ProposerTests(unittest.TestCase):
     @staticmethod
@@ -832,6 +850,7 @@ class ProposerTests(unittest.TestCase):
         self.assertTrue(any(isinstance(p, FixedSmallOutputProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, PixelExpansionProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, MiscTransformProposer) for p in defaults))
+        self.assertTrue(any(isinstance(p, ComponentBBoxProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, GridCellOperationProposer) for p in defaults))
 
     def test_pixel_expansion_proposer_adapts_nonzero_key_color(self) -> None:

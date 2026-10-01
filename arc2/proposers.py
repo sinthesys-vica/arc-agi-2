@@ -1298,6 +1298,59 @@ class MiscTransformProposer(Proposer):
         return _deduplicate(candidates)
 
 
+class ComponentBBoxProposer(Proposer):
+    """Crop to a connected component selected by a compact structural rule."""
+
+    tier = 1
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+        if any(
+            target.height > source.height
+            or target.width > source.width
+            or (target.height == source.height and target.width == source.width)
+            for source, target in zip(inputs, outputs)
+        ):
+            return []
+
+        candidates: list[Hypothesis] = []
+        rules = (
+            "largest",
+            "smallest",
+            "most_colors",
+            "unique_color",
+            "unique_pattern",
+            "bottommost",
+            "topmost",
+            "leftmost",
+            "rightmost",
+        )
+        for mode in ("foreground", "per_color"):
+            for connectivity in (4, 8):
+                for rule in rules:
+                    if mode == "per_color" and rule == "most_colors":
+                        continue
+                    transform = dsl.component_bbox_crop(mode, connectivity, rule)
+                    if _exact(transform, inputs, outputs):
+                        candidates.append(Hypothesis(
+                            transform,
+                            (
+                                f"crop {rule.replace('_', ' ')} {mode.replace('_', ' ')} "
+                                f"component using {connectivity}-connectivity"
+                            ),
+                            0.82,
+                            3,
+                            "component-bbox",
+                        ))
+        return _deduplicate(candidates)
+
+
 class GridCellOperationProposer(Proposer):
     """Apply structural operations to cells separated by uniform H+V dividers."""
 
@@ -1388,5 +1441,6 @@ def default_proposers() -> list[Proposer]:
         FixedSmallOutputProposer(),
         PixelExpansionProposer(),
         MiscTransformProposer(),
+        ComponentBBoxProposer(),
         GridCellOperationProposer(),
     ]
