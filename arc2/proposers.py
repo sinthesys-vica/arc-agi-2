@@ -867,6 +867,95 @@ class ShapeUnifierProposer(Proposer):
         return _deduplicate(candidates)
 
 
+class SparseSymmetryRepairProposer(Proposer):
+    """Repair sparse rectangle, boundary, legend, ray, and duplicate anomalies."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+        if any(source.grid.shape != target.grid.shape for source, target in zip(inputs, outputs)):
+            return []
+
+        candidates: list[Hypothesis] = []
+        fixed = (
+            (
+                dsl.complete_occluded_rectangles(),
+                "complete solid rectangles occluded by other colors",
+                4,
+                "occluded-rectangles",
+            ),
+            (
+                dsl.directed_marker_ray_cleanup(),
+                "clear the first border intrusion opposite a marker-attached line",
+                5,
+                "marker-ray-cleanup",
+            ),
+            (
+                dsl.legend_sample_erase(),
+                "erase external instances of the L-legend sample color",
+                4,
+                "legend-sample-erase",
+            ),
+        )
+        for transform, description, complexity, family in fixed:
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(transform, description, 0.74, complexity, family))
+
+        shared_colors = set(int(value) for value in np.unique(inputs[0].grid))
+        for scene in inputs[1:]:
+            shared_colors &= set(int(value) for value in np.unique(scene.grid))
+        shared_backgrounds = {scene.background_color() for scene in inputs}
+        for foreground in sorted(shared_colors - shared_backgrounds):
+            transform = dsl.opposite_edge_anomaly_pairs(foreground)
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(
+                    transform,
+                    f"complete opposite-edge dent/bulge pairs in color {foreground}",
+                    0.76,
+                    6,
+                    "opposite-edge-anomalies",
+                ))
+
+        introduced: set[int] | None = None
+        changed_sources: set[int] | None = None
+        for source, target in zip(inputs, outputs):
+            new_colors = set(int(value) for value in np.unique(target.grid)) - set(
+                int(value) for value in np.unique(source.grid)
+            )
+            introduced = new_colors if introduced is None else introduced & new_colors
+            changed = source.grid != target.grid
+            old_colors = set(int(value) for value in np.unique(source.grid[changed]))
+            changed_sources = old_colors if changed_sources is None else changed_sources & old_colors
+        for result_color in sorted(introduced or set()):
+            for mask_color in sorted(changed_sources or set()):
+                references = shared_colors - shared_backgrounds - {result_color, mask_color}
+                for reference_color in sorted(references):
+                    transform = dsl.duplicate_template_refine(
+                        result_color,
+                        mask_color,
+                        reference_color,
+                    )
+                    if _exact(transform, inputs, outputs):
+                        candidates.append(Hypothesis(
+                            transform,
+                            (
+                                f"trim color {mask_color} facing reference {reference_color} "
+                                f"and mark its edge color {result_color}"
+                            ),
+                            0.72,
+                            6,
+                            "duplicate-template-refine",
+                        ))
+        return _deduplicate(candidates)
+
+
 def default_proposers() -> list[Proposer]:
     """Return the deterministic baseline proposer set in search order."""
 
@@ -894,4 +983,5 @@ def default_proposers() -> list[Proposer]:
         WallpaperRepairProposer(),
         SymmetryCompleterProposer(),
         ShapeUnifierProposer(),
+        SparseSymmetryRepairProposer(),
     ]

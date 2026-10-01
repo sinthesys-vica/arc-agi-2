@@ -26,6 +26,7 @@ from arc2.proposers import (
     PeriodicStripeProposer,
     OrientedMarkerLineProposer,
     ShapeUnifierProposer,
+    SparseSymmetryRepairProposer,
     SymmetryCompleterProposer,
     WallpaperRepairProposer,
     ResizeProposer,
@@ -386,6 +387,65 @@ class DSLTests(unittest.TestCase):
             [3, 3, 8, 8, 3, 3],
         ])
 
+    def test_complete_occluded_rectangles_uses_nonzero_background(self) -> None:
+        source = np.full((6, 7), 7, dtype=int)
+        source[1:5, 3:6] = 4
+        source[3:5, 1:5] = 1
+        actual = dsl.complete_occluded_rectangles()(source)
+        expected = source.copy()
+        expected[1:5, 3:6] = 4
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_opposite_edge_anomaly_pairs_completes_dent_and_bulge(self) -> None:
+        source = np.full((7, 8), 8, dtype=int)
+        source[2:5, 2:6] = 1
+        source[2, 4] = 8
+        source[5, 3] = 1
+        actual = dsl.opposite_edge_anomaly_pairs(1)(source)
+        expected = source.copy()
+        expected[5, 4] = 1
+        expected[2, 3] = 8
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_directed_marker_ray_cleanup_follows_diagonal(self) -> None:
+        source = np.full((8, 8), 7, dtype=int)
+        source[3, 3] = 2
+        source[4, 4] = source[5, 5] = source[6, 6] = 6
+        source[1, 1] = 9
+        actual = dsl.directed_marker_ray_cleanup()(source)
+        expected = source.copy()
+        expected[1, 1] = 7
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_legend_sample_erase_preserves_sample(self) -> None:
+        source = np.zeros((7, 7), dtype=int)
+        source[0:4, 3] = 5
+        source[3, 0:4] = 5
+        source[1, 1] = source[5, 5] = source[6, 2] = 4
+        actual = dsl.legend_sample_erase()(source)
+        expected = source.copy()
+        expected[5, 5] = expected[6, 2] = 0
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_duplicate_template_refine_marks_stair_anchor(self) -> None:
+        source = np.full((12, 14), 7, dtype=int)
+        source[0, 0:3] = 1
+        source[1, 1:3] = 1
+        source[2, 2] = 1
+        source[5, 9:14] = 5
+        source[6, 10:14] = 5
+        source[7, 11:14] = 5
+        source[8, 12:14] = 5
+        first = [(3, 2), (4, 2)] + [(row, col) for row in range(5, 9) for col in range(1, 4)]
+        second = [(9, col) for col in range(4, 8)] + [(10, col) for col in range(4, 10)] + [(11, col) for col in range(4, 8)]
+        for cell in first + second:
+            source[cell] = 0
+        source[4, 6] = 3
+        actual = dsl.duplicate_template_refine(6)(source)
+        self.assertTrue(np.all(actual[5:9, 3] == 6))
+        self.assertTrue(np.all(actual[5:9, 1:3] == 0))
+        self.assertEqual(int(actual[3, 2]), 7)
+
 
 class ProposerTests(unittest.TestCase):
     @staticmethod
@@ -527,6 +587,7 @@ class ProposerTests(unittest.TestCase):
         self.assertTrue(any(isinstance(p, WallpaperRepairProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, SymmetryCompleterProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, ShapeUnifierProposer) for p in defaults))
+        self.assertTrue(any(isinstance(p, SparseSymmetryRepairProposer) for p in defaults))
 
     def test_default_proposers_integrate_with_search(self) -> None:
         train = [{

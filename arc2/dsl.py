@@ -1549,3 +1549,375 @@ def periodic_perimeter_segments(background: int | None = None) -> Transform:
         return result
 
     return _decorate(transform, "periodic_perimeter_segments", background)
+
+
+def complete_occluded_rectangles(background: int | None = None) -> Transform:
+    """Restore solid rectangles or diagonal rays occluded by another color.
+
+    A color is eligible only when its aggregate bounding box contains no
+    background cells.  This distinguishes a genuinely occluded rectangle from
+    an arbitrary sparse object.  Conflicting candidate rectangles fail closed.
+    """
+
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = Scene(source).background_color() if background is None else background
+        candidates: list[tuple[int, int, int, int, int]] = []
+        for color_value in np.unique(source):
+            color = int(color_value)
+            if color == bg:
+                continue
+            cells = np.argwhere(source == color)
+            r0, c0 = (int(value) for value in cells.min(axis=0))
+            r1, c1 = (int(value) for value in cells.max(axis=0))
+            window = source[r0:r1 + 1, c0:c1 + 1]
+            if np.all(window == color) or np.any(window == bg):
+                continue
+            candidates.append((color, r0, c0, r1, c1))
+
+        for index, first in enumerate(candidates):
+            _, ar0, ac0, ar1, ac1 = first
+            for second in candidates[index + 1:]:
+                _, br0, bc0, br1, bc1 = second
+                if max(ar0, br0) <= min(ar1, br1) and max(ac0, bc0) <= min(ac1, bc1):
+                    raise ValueError("occluded rectangle candidates overlap ambiguously")
+
+        writes: dict[tuple[int, int], int] = {}
+        for color, r0, c0, r1, c1 in candidates:
+            for row in range(r0, r1 + 1):
+                for column in range(c0, c1 + 1):
+                    if int(source[row, column]) != color:
+                        writes[(row, column)] = color
+
+        # A long diagonal can be read exactly like a one-cell-wide rectangle:
+        # if every gap is occupied by another foreground color, restore it.
+        for color_value in np.unique(source):
+            color = int(color_value)
+            if color == bg:
+                continue
+            cells = [tuple(int(value) for value in cell) for cell in np.argwhere(source == color)]
+            if len(cells) < 3:
+                continue
+            expected_lines: list[list[tuple[int, int]]] = []
+            if len({row - column for row, column in cells}) == 1:
+                diagonal = cells[0][0] - cells[0][1]
+                rows = range(min(row for row, _ in cells), max(row for row, _ in cells) + 1)
+                expected_lines.append([(row, row - diagonal) for row in rows])
+            if len({row + column for row, column in cells}) == 1:
+                diagonal = cells[0][0] + cells[0][1]
+                rows = range(min(row for row, _ in cells), max(row for row, _ in cells) + 1)
+                expected_lines.append([(row, diagonal - row) for row in rows])
+            for expected in expected_lines:
+                missing = [cell for cell in expected if int(source[cell]) != color]
+                if not missing or any(int(source[cell]) == bg for cell in missing):
+                    continue
+                for cell in missing:
+                    previous = writes.setdefault(cell, color)
+                    if previous != color:
+                        raise ValueError("occluded shape repairs conflict")
+
+        if not writes:
+            raise ValueError("no occluded rectangle or diagonal found")
+        result = source.copy()
+        for cell, color in writes.items():
+            result[cell] = color
+        return result
+
+    return _decorate(transform, "complete_occluded_rectangles", background)
+
+
+def opposite_edge_anomaly_pairs(foreground: int, background: int | None = None) -> Transform:
+    """Complete the opposite dents/bulges of a regular two-bar L shape."""
+
+    if foreground not in range(10):
+        raise ValueError("foreground color must be in [0, 9]")
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = Scene(source).background_color() if background is None else background
+        if foreground == bg or set(int(value) for value in np.unique(source)) != {bg, foreground}:
+            raise ValueError("opposite-edge repair requires one foreground color")
+        mask = source == foreground
+        height, width = mask.shape
+        row_counts = np.count_nonzero(mask, axis=1)
+        column_counts = np.count_nonzero(mask, axis=0)
+        if not row_counts.max() or not column_counts.max():
+            raise ValueError("foreground is empty")
+
+        def longest_group(indices: list[int]) -> list[int]:
+            groups: list[list[int]] = []
+            for value in indices:
+                if groups and value == groups[-1][-1] + 1:
+                    groups[-1].append(value)
+                else:
+                    groups.append([value])
+            if not groups:
+                raise ValueError("regular bar not found")
+            maximum = max(len(group) for group in groups)
+            best = [group for group in groups if len(group) == maximum]
+            if len(best) != 1:
+                raise ValueError("regular bar axis is ambiguous")
+            return best[0]
+
+        horizontal_rows = longest_group([
+            row for row, count in enumerate(row_counts)
+            if count > float(row_counts.max()) * 0.65
+        ])
+        vertical_columns = longest_group([
+            column for column, count in enumerate(column_counts)
+            if count > float(column_counts.max()) * 0.65
+        ])
+
+        def middle(values: list[int]) -> int:
+            ordered = sorted(values)
+            size = len(ordered)
+            if size % 2:
+                return ordered[size // 2]
+            return (ordered[size // 2 - 1] + ordered[size // 2]) // 2
+
+        horizontal_left = middle([int(np.flatnonzero(mask[row])[0]) for row in horizontal_rows])
+        horizontal_right = middle([int(np.flatnonzero(mask[row])[-1]) for row in horizontal_rows])
+        vertical_top = middle([int(np.flatnonzero(mask[:, column])[0]) for column in vertical_columns])
+        vertical_bottom = middle([int(np.flatnonzero(mask[:, column])[-1]) for column in vertical_columns])
+
+        base = np.zeros_like(mask)
+        base[min(horizontal_rows):max(horizontal_rows) + 1, horizontal_left:horizontal_right + 1] = True
+        base[vertical_top:vertical_bottom + 1, min(vertical_columns):max(vertical_columns) + 1] = True
+        differences = np.argwhere(mask != base)
+        if not len(differences):
+            raise ValueError("regular L shape has no dents or bulges")
+
+        result = source.copy()
+        written: dict[tuple[int, int], int] = {}
+        for row_value, column_value in differences:
+            row, column = int(row_value), int(column_value)
+            extra = bool(mask[row, column])
+            directions: list[tuple[int, int]] = []
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                if extra:
+                    neighbor = (row - dr, column - dc)
+                    if 0 <= neighbor[0] < height and 0 <= neighbor[1] < width and base[neighbor]:
+                        directions.append((dr, dc))
+                else:
+                    neighbor = (row + dr, column + dc)
+                    if not (0 <= neighbor[0] < height and 0 <= neighbor[1] < width and base[neighbor]):
+                        directions.append((dr, dc))
+            if len(directions) != 1:
+                raise ValueError("dent or bulge does not have one outward direction")
+            dr, dc = directions[0]
+            axis = 0 if dr else 1
+            if axis == 0:
+                line_column = column
+                if extra:
+                    line_column -= dc
+                indices = [value for value in range(height) if base[value, line_column]]
+            else:
+                line_row = row
+                if extra:
+                    line_row -= dr
+                indices = [value for value in range(width) if base[line_row, value]]
+            if not indices:
+                raise ValueError("dent or bulge has no opposite base edge")
+            coordinate = row if axis == 0 else column
+            sign = dr if axis == 0 else dc
+            target_coordinate = min(indices) + max(indices) - coordinate + sign * (1 if extra else -1)
+            target = [row, column]
+            target[axis] = target_coordinate
+            target_cell = (target[0], target[1])
+            if not (0 <= target[0] < height and 0 <= target[1] < width):
+                raise ValueError("opposite repair would leave the grid")
+            value = bg if extra else foreground
+            previous = written.setdefault(target_cell, value)
+            if previous != value:
+                raise ValueError("opposite repairs conflict")
+
+        for cell, value in written.items():
+            result[cell] = value
+        if np.array_equal(result, source):
+            raise ValueError("opposite-edge repair would be a no-op")
+        return result
+
+    return _decorate(transform, "opposite_edge_anomaly_pairs", foreground, background)
+
+
+def directed_marker_ray_cleanup() -> Transform:
+    """Erase the first border intrusion opposite a marker-attached line."""
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        scene = Scene(source)
+        bg = scene.background_color()
+        positions = {int(color): np.argwhere(source == color) for color in np.unique(source)}
+        candidates: list[tuple[int, int, int]] = []
+        directions = [
+            (-1, -1), (-1, 0), (-1, 1), (0, -1),
+            (0, 1), (1, -1), (1, 0), (1, 1),
+        ]
+        for marker_color, marker_cells in positions.items():
+            if marker_color == bg or len(marker_cells) != 1:
+                continue
+            marker = tuple(int(value) for value in marker_cells[0])
+            for line_color, line_cells in positions.items():
+                if line_color in (bg, marker_color) or len(line_cells) < 2:
+                    continue
+                cells = {tuple(int(value) for value in cell) for cell in line_cells}
+                for dr, dc in directions:
+                    expected = {(marker[0] + step * dr, marker[1] + step * dc) for step in range(1, len(cells) + 1)}
+                    if expected != cells:
+                        continue
+                    row, column = marker[0] - dr, marker[1] - dc
+                    if not (0 <= row < source.shape[0] and 0 <= column < source.shape[1]):
+                        continue
+                    fill = int(source[row, column])
+                    if fill in (marker_color, line_color):
+                        continue
+                    while 0 <= row < source.shape[0] and 0 <= column < source.shape[1] and int(source[row, column]) == fill:
+                        row -= dr
+                        column -= dc
+                    if 0 <= row < source.shape[0] and 0 <= column < source.shape[1]:
+                        candidates.append((row, column, fill))
+        unique = sorted(set(candidates))
+        if len(unique) != 1:
+            raise ValueError("marker ray is absent or ambiguous")
+        row, column, fill = unique[0]
+        result = source.copy()
+        result[row, column] = fill
+        return result
+
+    return _decorate(transform, "directed_marker_ray_cleanup")
+
+
+def legend_sample_erase(background: int | None = None) -> Transform:
+    """Use the singleton inside an L-shaped legend to erase that color outside."""
+
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        scene = Scene(source)
+        bg = scene.background_color() if background is None else background
+        matches: list[tuple[int, tuple[int, int, int, int]]] = []
+        for obj in scene.objects():
+            if obj.color == bg or obj.bbox.height != obj.bbox.width or obj.bbox.height < 3:
+                continue
+            n = obj.bbox.height
+            cells = set(obj.cells)
+            r0, c0, r1, c1 = obj.bbox.r0, obj.bbox.c0, obj.bbox.r1, obj.bbox.c1
+            patterns = [
+                ({(r1, c) for c in range(c0, c1 + 1)} | {(r, c1) for r in range(r0, r1 + 1)}, (r0, c0, r1 - 1, c1 - 1)),
+                ({(r1, c) for c in range(c0, c1 + 1)} | {(r, c0) for r in range(r0, r1 + 1)}, (r0, c0 + 1, r1 - 1, c1)),
+                ({(r0, c) for c in range(c0, c1 + 1)} | {(r, c1) for r in range(r0, r1 + 1)}, (r0 + 1, c0, r1, c1 - 1)),
+                ({(r0, c) for c in range(c0, c1 + 1)} | {(r, c0) for r in range(r0, r1 + 1)}, (r0 + 1, c0 + 1, r1, c1)),
+            ]
+            for expected, interior in patterns:
+                if cells != expected:
+                    continue
+                ir0, ic0, ir1, ic1 = interior
+                values = source[ir0:ir1 + 1, ic0:ic1 + 1]
+                samples = [(int(value), int(np.count_nonzero(values == value))) for value in np.unique(values) if int(value) not in (bg, obj.color)]
+                if len(samples) == 1 and samples[0][1] == 1:
+                    matches.append((samples[0][0], (r0, c0, r1, c1)))
+        if len(matches) != 1:
+            raise ValueError("L-shaped legend is absent or ambiguous")
+        sample, box = matches[0]
+        r0, c0, r1, c1 = box
+        result = source.copy()
+        outside = source == sample
+        outside[r0:r1 + 1, c0:c1 + 1] = False
+        if not np.any(outside):
+            raise ValueError("legend sample has no external instances")
+        result[outside] = bg
+        return result
+
+    return _decorate(transform, "legend_sample_erase", background)
+
+
+def duplicate_template_refine(
+    result_color: int,
+    mask_color: int = 0,
+    reference_color: int = 5,
+    background: int | None = None,
+) -> Transform:
+    """Trim the mask whose rectangular body faces a reference object sideways."""
+
+    for name, color in (
+        ("result", result_color),
+        ("mask", mask_color),
+        ("reference", reference_color),
+    ):
+        if color not in range(10):
+            raise ValueError(f"{name} color must be in [0, 9]")
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+    if len({result_color, mask_color, reference_color}) != 3:
+        raise ValueError("result, mask, and reference colors must differ")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        scene = Scene(source)
+        bg = scene.background_color() if background is None else background
+        if bg in (result_color, mask_color, reference_color):
+            raise ValueError("foreground roles may not use the background color")
+        reference_cells = np.argwhere(source == reference_color)
+        if not len(reference_cells):
+            raise ValueError("reference object is absent")
+        reference_top, reference_left = (int(value) for value in reference_cells.min(axis=0))
+        reference_bottom, reference_right = (int(value) for value in reference_cells.max(axis=0))
+
+        candidates: list[tuple[int, object, tuple[int, int, int, int]]] = []
+        for obj in scene.components(color=mask_color):
+            if obj.size < 2:
+                continue
+            object_cells = set(obj.cells)
+            rectangles: list[tuple[int, int, int, int, int]] = []
+            for r0 in range(obj.bbox.r0, obj.bbox.r1 + 1):
+                for r1 in range(r0, obj.bbox.r1 + 1):
+                    for c0 in range(obj.bbox.c0, obj.bbox.c1 + 1):
+                        for c1 in range(c0, obj.bbox.c1 + 1):
+                            cells = {
+                                (row, column)
+                                for row in range(r0, r1 + 1)
+                                for column in range(c0, c1 + 1)
+                            }
+                            if cells <= object_cells:
+                                rectangles.append((len(cells), r0, c0, r1, c1))
+            if not rectangles:
+                continue
+            area, r0, c0, r1, c1 = max(rectangles)
+            row_overlap = max(r0, reference_top) <= min(r1, reference_bottom)
+            sideways = c1 < reference_left or c0 > reference_right
+            if area <= 1 or not row_overlap or not sideways:
+                continue
+            distance = reference_left - c1 if c1 < reference_left else c0 - reference_right
+            candidates.append((distance, obj, (r0, c0, r1, c1)))
+
+        if not candidates:
+            raise ValueError("no mask body faces the reference sideways")
+        minimum = min(distance for distance, _, _ in candidates)
+        best = [candidate for candidate in candidates if candidate[0] == minimum]
+        if len(best) != 1:
+            raise ValueError("side-facing mask selection is ambiguous")
+        _, target, (r0, c0, r1, c1) = best[0]
+
+        result = source.copy()
+        for cell in target.cells:
+            result[cell] = bg
+        result[r0:r1 + 1, c0:c1 + 1] = mask_color
+        facing_column = c1 if c1 < reference_left else c0
+        result[r0:r1 + 1, facing_column] = result_color
+        return result
+
+    return _decorate(
+        transform,
+        "duplicate_template_refine",
+        result_color,
+        mask_color,
+        reference_color,
+        background,
+    )
