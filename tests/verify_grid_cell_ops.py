@@ -79,10 +79,17 @@ def test_acceptance_task(task_id, tasks, proposers):
 def test_no_regression(tasks, proposers):
     """Benchmark must not regress: ≥56 solved, 0 contract violations."""
     from arc2.solve import solve_all
+    from arc2.verify import validate_prediction
 
     results = solve_all(tasks, proposers, total_time_seconds=600)
     solved = sum(1 for r in results.values() if r["solved"])
-    violations = sum(1 for r in results.values() if r.get("contract_violation"))
+    violations = 0
+    for r in results.values():
+        for pred in r["predictions"]:
+            for attempt in ("attempt_1", "attempt_2"):
+                ok, _ = validate_prediction(pred[attempt])
+                if not ok:
+                    violations += 1
 
     assert solved >= 56, f"Regression: {solved} < 56 solved"
     assert violations == 0, f"Contract violations: {violations}"

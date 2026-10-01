@@ -53,17 +53,19 @@ The proposer MUST:
 - Train pairs: 2
 
 ### Task 2: 5a5a2103 (Grid Stamp)
-- Grid: 4×4, divider color 3 (or 8)
+- Grid: 4×4, divider color 3 (the 8 is a KEY color, not the divider)
 - Cell size: 4×4 (uniform)
-- Mechanism: one cell per row has a 2×2 color block (key), one cell has a shape template
+- Mechanism: one cell per row has a 2×2 color block (key), one cell (3,1) has
+  a staircase shape template (in 6)
 - Output: ALL cells get the template stamped in their row's key color
 - Train pairs: 2
 
 ### Task 3: 1e32b0e9 (Pattern Fill)
 - Grid: 3×3, divider color 2
 - Cell size: 5×5 (uniform)
-- Mechanism: some cells have colored patterns, others are empty
-- Output: empty cells get filled based on patterns from occupied cells
+- Mechanism: cells carry PARTIAL 1-patterns; the implied full shape is
+  COMPLETED with color 2 inside the same cell (the 1s stay)
+- Output: pattern completion within the partially filled cells
 - Train pairs: 3
 
 ### Task 4: e3fe1151 (Cell Transform)
