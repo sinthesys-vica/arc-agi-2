@@ -966,6 +966,91 @@ def component_bbox_crop(
     )
 
 
+def transform_overlay(
+    symmetry: str,
+    operation: str,
+    background: int | None = None,
+) -> Transform:
+    """Combine a grid with one of its geometric transforms."""
+
+    symmetries = {
+        "rotate_90": rotate(1),
+        "rotate_180": rotate(2),
+        "rotate_270": rotate(3),
+        "flip_h": flip_lr,
+        "flip_v": flip_ud,
+        "transpose": transpose,
+    }
+    operations = {"or", "and", "xor", "max", "min"}
+    if symmetry not in symmetries:
+        raise ValueError(f"symmetry must be one of {sorted(symmetries)}")
+    if operation not in operations:
+        raise ValueError(f"operation must be one of {sorted(operations)}")
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+    geometric = symmetries[symmetry]
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        transformed = geometric(source)
+        if transformed.shape != source.shape:
+            raise ValueError("overlay symmetry changed the grid shape")
+        bg = (
+            Counter(int(value) for value in source.flat).most_common(1)[0][0]
+            if background is None
+            else background
+        )
+        source_fg = source != bg
+        transformed_fg = transformed != bg
+        if operation == "or":
+            return np.where(
+                source_fg | transformed_fg,
+                np.where(source_fg, source, transformed),
+                bg,
+            )
+        if operation == "and":
+            return np.where(source_fg & transformed_fg, source, bg)
+        if operation == "xor":
+            return np.where(
+                source_fg ^ transformed_fg,
+                np.where(source_fg, source, transformed),
+                bg,
+            )
+        if operation == "max":
+            return np.maximum(source, transformed)
+        return np.minimum(source, transformed)
+
+    return _decorate(transform, "transform_overlay", symmetry, operation, background)
+
+
+def fill_enclosed_holes(
+    fill_color: int,
+    background: int | None = None,
+) -> Transform:
+    """Fill background regions enclosed by the aggregate foreground mask."""
+
+    if fill_color not in range(10):
+        raise ValueError("fill color must be in [0, 9]")
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = (
+            Counter(int(value) for value in source.flat).most_common(1)[0][0]
+            if background is None
+            else background
+        )
+        foreground = source != bg
+        filled = ndimage.binary_fill_holes(foreground)
+        holes = filled & ~foreground
+        result = source.copy()
+        result[holes] = fill_color
+        return result
+
+    return _decorate(transform, "fill_enclosed_holes", fill_color, background)
+
+
 def block_analogy(background: int | None = None) -> Transform:
     """Apply each demonstrated A-to-B block rule to its neighboring C block.
 

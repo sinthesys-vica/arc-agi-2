@@ -31,6 +31,7 @@ from arc2.proposers import (
     PixelExpansionProposer,
     PeriodicStripeProposer,
     OrientedMarkerLineProposer,
+    OverlayFillProposer,
     ShapeUnifierProposer,
     SparseSymmetryRepairProposer,
     SymmetryCompleterProposer,
@@ -704,6 +705,34 @@ class DSLTests(unittest.TestCase):
             expected,
         )
 
+    def test_overlay_and_enclosed_hole_fill(self) -> None:
+        source = np.array([
+            [0, 2, 0],
+            [0, 0, 0],
+            [0, 0, 0],
+        ])
+        expected_overlay = np.array([
+            [0, 2, 0],
+            [0, 0, 0],
+            [0, 2, 0],
+        ])
+        np.testing.assert_array_equal(
+            dsl.transform_overlay("flip_v", "or")(source),
+            expected_overlay,
+        )
+
+        ring = np.zeros((5, 5), dtype=int)
+        ring[1, 1:4] = 3
+        ring[3, 1:4] = 3
+        ring[1:4, 1] = 3
+        ring[1:4, 3] = 3
+        filled = ring.copy()
+        filled[2, 2] = 4
+        np.testing.assert_array_equal(
+            dsl.fill_enclosed_holes(4)(ring),
+            filled,
+        )
+
 
 class ProposerTests(unittest.TestCase):
     @staticmethod
@@ -851,6 +880,7 @@ class ProposerTests(unittest.TestCase):
         self.assertTrue(any(isinstance(p, PixelExpansionProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, MiscTransformProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, ComponentBBoxProposer) for p in defaults))
+        self.assertTrue(any(isinstance(p, OverlayFillProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, GridCellOperationProposer) for p in defaults))
 
     def test_pixel_expansion_proposer_adapts_nonzero_key_color(self) -> None:

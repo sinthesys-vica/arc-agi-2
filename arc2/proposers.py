@@ -1351,6 +1351,56 @@ class ComponentBBoxProposer(Proposer):
         return _deduplicate(candidates)
 
 
+class OverlayFillProposer(Proposer):
+    """Overlay geometric copies or fill holes enclosed by foreground."""
+
+    tier = 1
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+        if any(source.grid.shape != target.grid.shape for source, target in zip(inputs, outputs)):
+            return []
+
+        candidates: list[Hypothesis] = []
+        for symmetry in (
+            "rotate_90",
+            "rotate_180",
+            "rotate_270",
+            "flip_h",
+            "flip_v",
+            "transpose",
+        ):
+            for operation in ("or", "and", "xor", "max", "min"):
+                transform = dsl.transform_overlay(symmetry, operation)
+                if _exact(transform, inputs, outputs):
+                    candidates.append(Hypothesis(
+                        transform,
+                        f"combine input with {symmetry.replace('_', ' ')} using {operation}",
+                        0.82,
+                        3,
+                        "transform-overlay",
+                    ))
+
+        for fill_color in range(10):
+            transform = dsl.fill_enclosed_holes(fill_color)
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(
+                    transform,
+                    f"fill enclosed foreground holes with color {fill_color}",
+                    0.84,
+                    2,
+                    "enclosed-hole-fill",
+                ))
+
+        return _deduplicate(candidates)
+
+
 class GridCellOperationProposer(Proposer):
     """Apply structural operations to cells separated by uniform H+V dividers."""
 
@@ -1442,5 +1492,6 @@ def default_proposers() -> list[Proposer]:
         PixelExpansionProposer(),
         MiscTransformProposer(),
         ComponentBBoxProposer(),
+        OverlayFillProposer(),
         GridCellOperationProposer(),
     ]
