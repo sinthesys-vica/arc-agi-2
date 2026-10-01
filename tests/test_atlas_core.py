@@ -26,6 +26,7 @@ from arc2.proposers import (
     PartitionBlueprintProposer,
     PartitionMarkerRouteProposer,
     PartitionMaxCountProposer,
+    PixelExpansionProposer,
     PeriodicStripeProposer,
     OrientedMarkerLineProposer,
     ShapeUnifierProposer,
@@ -610,6 +611,41 @@ class DSLTests(unittest.TestCase):
             extract[0:3, 4:7],
         )
 
+    def test_pixel_expansion_primitives(self) -> None:
+        source = np.array([[4, 0], [0, 4]])
+        blank = np.zeros_like(source)
+        expected_self = np.block([[source, blank], [blank, source]])
+        np.testing.assert_array_equal(
+            dsl.pixel_self_substitute("nonzero")(source),
+            expected_self,
+        )
+
+        complement = np.array([[0, 4], [4, 0]])
+        expected_complement = np.block([[complement, blank], [blank, complement]])
+        np.testing.assert_array_equal(
+            dsl.pixel_complement_substitute("nonzero")(source),
+            expected_complement,
+        )
+
+        expected_mirror = np.block([
+            [source, np.fliplr(source)],
+            [np.flipud(source), np.rot90(source, 2)],
+        ])
+        np.testing.assert_array_equal(dsl.mirror4_tile()(source), expected_mirror)
+
+        mapping = {
+            0: np.array([[0, 0], [0, 0]]),
+            4: np.array([[1, 2], [2, 1]]),
+        }
+        expected_blocks = np.block([
+            [mapping[4], mapping[0]],
+            [mapping[0], mapping[4]],
+        ])
+        np.testing.assert_array_equal(
+            dsl.color_block_substitute(mapping)(source),
+            expected_blocks,
+        )
+
 
 class ProposerTests(unittest.TestCase):
     @staticmethod
@@ -754,7 +790,18 @@ class ProposerTests(unittest.TestCase):
         self.assertTrue(any(isinstance(p, SparseSymmetryRepairProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, FillFromBackgroundProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, FixedSmallOutputProposer) for p in defaults))
+        self.assertTrue(any(isinstance(p, PixelExpansionProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, GridCellOperationProposer) for p in defaults))
+
+    def test_pixel_expansion_proposer_adapts_nonzero_key_color(self) -> None:
+        first = Scene([[6, 0], [0, 6]])
+        second = Scene([[0, 3], [3, 0]])
+        outputs = [
+            Scene([[6, 0, 0, 0], [0, 6, 0, 0], [0, 0, 6, 0], [0, 0, 0, 6]]),
+            Scene([[0, 0, 0, 3], [0, 0, 3, 0], [0, 3, 0, 0], [3, 0, 0, 0]]),
+        ]
+        proposals = PixelExpansionProposer().propose([first, second], outputs)
+        self.assertTrue(any("sole non-zero" in h.description for h in proposals))
 
     def test_default_proposers_integrate_with_search(self) -> None:
         train = [{

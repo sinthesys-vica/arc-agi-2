@@ -167,6 +167,10 @@ def should_skip_proposer(proposer: Proposer, sig: TaskSignature) -> bool:
     if name == "ResizeProposer" and sig.all_same_size:
         return True
 
+    # PixelExpansionProposer only emits transforms that enlarge the canvas.
+    if name == "PixelExpansionProposer" and sig.all_same_size:
+        return True
+
     # GeometricProposer (pure D4): skip if colors change between in/out
     # (D4 transforms don't change colors)
     if name == "GeometricProposer" and sig.has_color_change:

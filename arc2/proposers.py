@@ -96,6 +96,36 @@ def _deduplicate(hypotheses: list[Hypothesis]) -> list[Hypothesis]:
     return result
 
 
+def _infer_color_block_mapping(
+    source: np.ndarray,
+    target: np.ndarray,
+) -> dict[int, np.ndarray] | None:
+    """Infer a fixed output block for every color in one source grid."""
+
+    source = np.asarray(source, dtype=int)
+    target = np.asarray(target, dtype=int)
+    if target.shape[0] % source.shape[0] or target.shape[1] % source.shape[1]:
+        return None
+    block_height = target.shape[0] // source.shape[0]
+    block_width = target.shape[1] // source.shape[1]
+    if block_height < 1 or block_width < 1 or (block_height, block_width) == (1, 1):
+        return None
+
+    mapping: dict[int, np.ndarray] = {}
+    for row in range(source.shape[0]):
+        for column in range(source.shape[1]):
+            color = int(source[row, column])
+            block = target[
+                row * block_height:(row + 1) * block_height,
+                column * block_width:(column + 1) * block_width,
+            ]
+            previous = mapping.get(color)
+            if previous is not None and not np.array_equal(previous, block):
+                return None
+            mapping[color] = block.copy()
+    return mapping
+
+
 class GeometricProposer(Proposer):
     """Enumerate single-step D4 symmetries."""
 
@@ -1130,6 +1160,85 @@ class FixedSmallOutputProposer(Proposer):
         return _deduplicate(candidates)
 
 
+class PixelExpansionProposer(Proposer):
+    """Expand input pixels into input-sized, mirrored, or learned blocks."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+
+        candidates: list[Hypothesis] = []
+
+        # Strategy A: a semantic or literal key expands to the complete input.
+        selectors: list[tuple[str, int | None, str]] = [
+            ("nonzero", None, "sole non-zero color"),
+            ("most_frequent", None, "unique most-frequent color"),
+            ("least_frequent", None, "unique least-frequent color"),
+            ("full_line", None, "color spanning a complete row or column"),
+        ]
+        selectors.extend(
+            ("literal", color, f"color {color}")
+            for color in range(10)
+        )
+        for selector, key_color, label in selectors:
+            transform = dsl.pixel_self_substitute(selector, key_color)
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(
+                    transform,
+                    f"expand each {label} pixel to a copy of the input",
+                    0.82,
+                    4,
+                    "pixel-fractal-self-sub",
+                ))
+
+        # Strategy B: binary key pixels expand to a complemented input.
+        for selector, key_color, label in selectors:
+            transform = dsl.pixel_complement_substitute(selector, key_color)
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(
+                    transform,
+                    f"expand each {label} pixel to the binary complement",
+                    0.81,
+                    5,
+                    "pixel-complement-sub",
+                ))
+
+        # Strategy C: four possible corners may anchor the original grid.
+        for anchor in ("top_left", "bottom_right", "top_right", "bottom_left"):
+            transform = dsl.mirror4_tile(anchor)
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(
+                    transform,
+                    f"mirror the input into four quadrants anchored {anchor}",
+                    0.83,
+                    2,
+                    "mirror4-tile",
+                ))
+
+        # Strategy D: learn color-to-block substitution from pair zero, then
+        # require that exact mapping to generalize across every later pair.
+        mapping = _infer_color_block_mapping(inputs[0].grid, outputs[0].grid)
+        if mapping is not None:
+            transform = dsl.color_block_substitute(mapping)
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(
+                    transform,
+                    "replace colors with consistently learned output blocks",
+                    0.80,
+                    5,
+                    "learned-color-block",
+                ))
+
+        return _deduplicate(candidates)
+
+
 class GridCellOperationProposer(Proposer):
     """Apply structural operations to cells separated by uniform H+V dividers."""
 
@@ -1218,5 +1327,6 @@ def default_proposers() -> list[Proposer]:
         SparseSymmetryRepairProposer(),
         FillFromBackgroundProposer(),
         FixedSmallOutputProposer(),
+        PixelExpansionProposer(),
         GridCellOperationProposer(),
     ]

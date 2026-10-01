@@ -495,6 +495,215 @@ def self_similar_stamp(marker_color: int, background: int | None = None) -> Tran
     return _decorate(transform, "self_similar_stamp", marker_color, background)
 
 
+def _pixel_expansion_key(
+    source: np.ndarray,
+    selector: str,
+    key_color: int | None,
+) -> int:
+    """Resolve a per-grid key color for pixel-expansion rules."""
+
+    colors, raw_counts = np.unique(source, return_counts=True)
+    counts = {int(color): int(count) for color, count in zip(colors, raw_counts)}
+
+    if selector == "literal":
+        if key_color is None or key_color not in counts:
+            raise ValueError("literal expansion key is absent")
+        return key_color
+    if selector == "nonzero":
+        candidates = [color for color in counts if color != 0]
+    elif selector in ("most_frequent", "least_frequent"):
+        target = (
+            max(counts.values())
+            if selector == "most_frequent"
+            else min(counts.values())
+        )
+        candidates = [color for color, count in counts.items() if count == target]
+    elif selector == "full_line":
+        candidates = [
+            color
+            for color in counts
+            if np.any(np.all(source == color, axis=0))
+            or np.any(np.all(source == color, axis=1))
+        ]
+    else:
+        raise ValueError(f"unknown pixel-expansion selector: {selector}")
+
+    if len(candidates) != 1:
+        raise ValueError("pixel-expansion key is ambiguous")
+    return candidates[0]
+
+
+def pixel_self_substitute(
+    selector: str,
+    key_color: int | None = None,
+    blank_color: int = 0,
+) -> Transform:
+    """Replace each selected pixel with a copy of the complete input.
+
+    Every other pixel expands to a solid blank block.  The selector is
+    evaluated independently on each grid so that a semantic role (for
+    example, the sole non-zero or uniquely most frequent color) may use a
+    different concrete color in each ARC example.
+    """
+
+    if key_color is not None and key_color not in range(10):
+        raise ValueError("key color must be in [0, 9]")
+    if blank_color not in range(10):
+        raise ValueError("blank color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        key = _pixel_expansion_key(source, selector, key_color)
+        height, width = source.shape
+        result = np.full(
+            (height * height, width * width),
+            blank_color,
+            dtype=int,
+        )
+        for row_value, column_value in np.argwhere(source == key):
+            row, column = int(row_value), int(column_value)
+            result[
+                row * height:(row + 1) * height,
+                column * width:(column + 1) * width,
+            ] = source
+        return result
+
+    return _decorate(
+        transform,
+        "pixel_self_substitute",
+        selector,
+        key_color,
+        blank_color,
+    )
+
+
+def pixel_complement_substitute(
+    selector: str,
+    key_color: int | None = None,
+    blank_color: int = 0,
+) -> Transform:
+    """Expand selected binary pixels to a color-complemented input copy."""
+
+    if key_color is not None and key_color not in range(10):
+        raise ValueError("key color must be in [0, 9]")
+    if blank_color not in range(10):
+        raise ValueError("blank color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        colors = sorted(int(value) for value in np.unique(source))
+        if len(colors) != 2:
+            raise ValueError("complement substitution requires exactly two colors")
+        key = _pixel_expansion_key(source, selector, key_color)
+        if key not in colors:
+            raise ValueError("complement key is absent")
+        other = colors[0] if colors[1] == key else colors[1]
+        complement = source.copy()
+        complement[source == key] = other
+        complement[source == other] = key
+
+        height, width = source.shape
+        result = np.full(
+            (height * height, width * width),
+            blank_color,
+            dtype=int,
+        )
+        for row_value, column_value in np.argwhere(source == key):
+            row, column = int(row_value), int(column_value)
+            result[
+                row * height:(row + 1) * height,
+                column * width:(column + 1) * width,
+            ] = complement
+        return result
+
+    return _decorate(
+        transform,
+        "pixel_complement_substitute",
+        selector,
+        key_color,
+        blank_color,
+    )
+
+
+def mirror4_tile(anchor: str = "top_left") -> Transform:
+    """Tile a grid and its axis reflections into a 2-by-2 mirror canvas."""
+
+    anchors = {"top_left", "top_right", "bottom_left", "bottom_right"}
+    if anchor not in anchors:
+        raise ValueError(f"anchor must be one of {sorted(anchors)}")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        if anchor == "top_left":
+            top = np.concatenate((source, np.fliplr(source)), axis=1)
+            bottom_source = np.flipud(source)
+            bottom = np.concatenate((bottom_source, np.fliplr(bottom_source)), axis=1)
+        elif anchor == "top_right":
+            right = source
+            left = np.fliplr(source)
+            top = np.concatenate((left, right), axis=1)
+            bottom = np.flipud(top)
+        elif anchor == "bottom_left":
+            bottom = np.concatenate((source, np.fliplr(source)), axis=1)
+            top = np.flipud(bottom)
+        else:
+            bottom_source = np.fliplr(source)
+            bottom = np.concatenate((bottom_source, source), axis=1)
+            top = np.flipud(bottom)
+        return np.concatenate((top, bottom), axis=0).copy()
+
+    return _decorate(transform, "mirror4_tile", anchor)
+
+
+def color_block_substitute(
+    mapping: Mapping[int, np.ndarray | list[list[int]]],
+) -> Transform:
+    """Replace each input color with its learned fixed-size output block."""
+
+    normalized: list[tuple[int, tuple[tuple[int, ...], ...]]] = []
+    block_shape: tuple[int, int] | None = None
+    for color, raw_block in sorted(mapping.items()):
+        color_i = int(color)
+        if color_i not in range(10):
+            raise ValueError("mapping colors must be in [0, 9]")
+        block = _grid(raw_block)
+        if np.any((block < 0) | (block > 9)):
+            raise ValueError("block colors must be in [0, 9]")
+        if block_shape is None:
+            block_shape = block.shape
+        elif block.shape != block_shape:
+            raise ValueError("all substitution blocks must have the same shape")
+        normalized.append((color_i, tuple(tuple(int(v) for v in row) for row in block)))
+    if not normalized or block_shape is None:
+        raise ValueError("color-block mapping must not be empty")
+
+    stored = {
+        color: np.asarray(block, dtype=int)
+        for color, block in normalized
+    }
+    block_height, block_width = block_shape
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        unknown = set(int(value) for value in np.unique(source)) - set(stored)
+        if unknown:
+            raise ValueError(f"no learned block for colors: {sorted(unknown)}")
+        height, width = source.shape
+        result = np.empty(
+            (height * block_height, width * block_width),
+            dtype=int,
+        )
+        for row in range(height):
+            for column in range(width):
+                result[
+                    row * block_height:(row + 1) * block_height,
+                    column * block_width:(column + 1) * block_width,
+                ] = stored[int(source[row, column])]
+        return result
+
+    return _decorate(transform, "color_block_substitute", tuple(normalized))
+
+
 def block_analogy(background: int | None = None) -> Transform:
     """Apply each demonstrated A-to-B block rule to its neighboring C block.
 
