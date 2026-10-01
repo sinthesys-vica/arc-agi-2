@@ -1130,6 +1130,64 @@ class FixedSmallOutputProposer(Proposer):
         return _deduplicate(candidates)
 
 
+class GridCellOperationProposer(Proposer):
+    """Apply structural operations to cells separated by uniform H+V dividers."""
+
+    tier = 3
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+        transforms = (
+            (
+                dsl.grid_key_pattern_recolor(),
+                "recolor neutral cell patterns from aligned singleton keys",
+                5,
+                "grid-key-pattern-recolor",
+            ),
+            (
+                dsl.grid_stamp_by_row_key(),
+                "broadcast one cell template in each grid row's key color",
+                6,
+                "grid-row-stamp",
+            ),
+            (
+                dsl.grid_fill_from_max_pattern(),
+                "complete every grid cell to the largest observed pattern mask",
+                5,
+                "grid-pattern-fill",
+            ),
+            (
+                dsl.grid_complete_cell_multiset(),
+                "replace divider placeholders to equalize cell color multisets",
+                6,
+                "grid-cell-multiset",
+            ),
+            (
+                dsl.extract_unique_nonuniform_grid_cell(),
+                "extract the unique non-uniform grid cell",
+                3,
+                "grid-cell-extraction",
+            ),
+        )
+        candidates: list[Hypothesis] = []
+        for transform, description, complexity, family in transforms:
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(
+                    transform,
+                    description,
+                    0.78,
+                    complexity,
+                    family,
+                ))
+        return _deduplicate(candidates)
+
+
 def default_proposers() -> list[Proposer]:
     """Return the deterministic baseline proposer set in search order."""
 
@@ -1160,4 +1218,5 @@ def default_proposers() -> list[Proposer]:
         SparseSymmetryRepairProposer(),
         FillFromBackgroundProposer(),
         FixedSmallOutputProposer(),
+        GridCellOperationProposer(),
     ]

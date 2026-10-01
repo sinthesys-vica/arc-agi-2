@@ -15,6 +15,7 @@ from arc2.proposers import (
     D4OrbitProposer,
     FillFromBackgroundProposer,
     FixedSmallOutputProposer,
+    GridCellOperationProposer,
     FractalProposer,
     GeometricProposer,
     LargestComponentProposer,
@@ -563,6 +564,52 @@ class DSLTests(unittest.TestCase):
             expected,
         )
 
+    def test_grid_cell_operation_primitives(self) -> None:
+        recolor = np.zeros((7, 7), dtype=int)
+        recolor[3, :] = recolor[:, 3] = 4
+        recolor[1, 1] = 5
+        recolor[5, 1] = 6
+        recolor[0, 4] = recolor[1, 5] = 1
+        recolor[4, 4] = recolor[5, 5] = 1
+        expected_recolor = recolor.copy()
+        expected_recolor[expected_recolor == 1] = np.array([5, 5, 6, 6])
+        np.testing.assert_array_equal(
+            dsl.grid_key_pattern_recolor()(recolor),
+            expected_recolor,
+        )
+
+        fill = np.zeros((7, 7), dtype=int)
+        fill[3, :] = fill[:, 3] = 2
+        fill[0, 0] = fill[0, 1] = fill[1, 0] = 1
+        fill[0, 4] = 1
+        expected_fill = fill.copy()
+        for r0 in (0, 4):
+            for c0 in (0, 4):
+                mask = np.array([[True, True, False], [True, False, False], [False, False, False]])
+                view = expected_fill[r0:r0 + 3, c0:c0 + 3]
+                view[mask & (view == 0)] = 2
+        np.testing.assert_array_equal(dsl.grid_fill_from_max_pattern()(fill), expected_fill)
+
+        multiset = np.array([
+            [7, 1, 7, 1, 7],
+            [2, 3, 7, 2, 4],
+            [7, 7, 7, 7, 7],
+            [1, 3, 7, 2, 3],
+            [7, 4, 7, 4, 7],
+        ])
+        completed = dsl.grid_complete_cell_multiset()(multiset)
+        for r0 in (0, 3):
+            for c0 in (0, 3):
+                self.assertEqual(sorted(completed[r0:r0 + 2, c0:c0 + 2].flat), [1, 2, 3, 4])
+
+        extract = np.full((7, 7), 4, dtype=int)
+        extract[3, :] = extract[:, 3] = 2
+        extract[1, 5] = 9
+        np.testing.assert_array_equal(
+            dsl.extract_unique_nonuniform_grid_cell()(extract),
+            extract[0:3, 4:7],
+        )
+
 
 class ProposerTests(unittest.TestCase):
     @staticmethod
@@ -707,6 +754,7 @@ class ProposerTests(unittest.TestCase):
         self.assertTrue(any(isinstance(p, SparseSymmetryRepairProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, FillFromBackgroundProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, FixedSmallOutputProposer) for p in defaults))
+        self.assertTrue(any(isinstance(p, GridCellOperationProposer) for p in defaults))
 
     def test_default_proposers_integrate_with_search(self) -> None:
         train = [{

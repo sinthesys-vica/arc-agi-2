@@ -2420,3 +2420,275 @@ def component_segment_histogram(
         columns,
         output_background,
     )
+
+
+def _partition_grid_cells(
+    source: np.ndarray,
+) -> tuple[int, list[tuple[int, int]], list[tuple[int, int]]]:
+    """Return divider color and half-open row/column spans for a strict grid."""
+
+    row_groups: dict[int, list[int]] = {}
+    column_groups: dict[int, list[int]] = {}
+    for row, values in enumerate(source):
+        colors = set(int(value) for value in values)
+        if len(colors) == 1:
+            row_groups.setdefault(next(iter(colors)), []).append(row)
+    for column, values in enumerate(source.T):
+        colors = set(int(value) for value in values)
+        if len(colors) == 1:
+            column_groups.setdefault(next(iter(colors)), []).append(column)
+    candidates = set(row_groups) & set(column_groups)
+    if not candidates:
+        raise ValueError("matching horizontal and vertical dividers are absent")
+    scores = {
+        color: len(row_groups[color]) + len(column_groups[color])
+        for color in candidates
+    }
+    best_score = max(scores.values())
+    best = [color for color, score in scores.items() if score == best_score]
+    if len(best) != 1:
+        raise ValueError("divider color is ambiguous")
+    divider = best[0]
+
+    def spans(length: int, dividers: list[int]) -> list[tuple[int, int]]:
+        result: list[tuple[int, int]] = []
+        start = 0
+        for stop in (*dividers, length):
+            if start >= stop:
+                raise ValueError("adjacent or border dividers create empty cells")
+            result.append((start, stop))
+            start = stop + 1
+        return result
+
+    row_spans = spans(source.shape[0], row_groups[divider])
+    column_spans = spans(source.shape[1], column_groups[divider])
+    shapes = {
+        (row_stop - row_start, column_stop - column_start)
+        for row_start, row_stop in row_spans
+        for column_start, column_stop in column_spans
+    }
+    if len(shapes) != 1:
+        raise ValueError("grid cells must have uniform dimensions")
+    return divider, row_spans, column_spans
+
+
+def grid_key_pattern_recolor() -> Transform:
+    """Recolor neutral pattern cells from aligned singleton key cells."""
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        _, row_spans, column_spans = _partition_grid_cells(source)
+        cells = [
+            [source[r0:r1, c0:c1] for c0, c1 in column_spans]
+            for r0, r1 in row_spans
+        ]
+        cell_values = np.concatenate([cell.ravel() for row in cells for cell in row])
+        background = Counter(int(value) for value in cell_values).most_common(1)[0][0]
+
+        foregrounds: list[list[np.ndarray]] = [
+            [cell[cell != background] for cell in row]
+            for row in cells
+        ]
+        key_rows = [
+            row
+            for row in range(len(row_spans))
+            if all(len(foregrounds[row][column]) == 1 for column in range(len(column_spans)))
+        ]
+        key_columns = [
+            column
+            for column in range(len(column_spans))
+            if all(len(foregrounds[row][column]) == 1 for row in range(len(row_spans)))
+        ]
+        row_oriented = len(key_rows) == 1 and not key_columns
+        column_oriented = len(key_columns) == 1 and not key_rows
+        if not (row_oriented or column_oriented):
+            raise ValueError("key row/column is absent or ambiguous")
+
+        result = source.copy()
+        if row_oriented:
+            key_row = key_rows[0]
+            key_colors = [int(foregrounds[key_row][column][0]) for column in range(len(column_spans))]
+            for row, (r0, r1) in enumerate(row_spans):
+                if row == key_row:
+                    continue
+                for column, (c0, c1) in enumerate(column_spans):
+                    foreground = foregrounds[row][column]
+                    if len(foreground) < 2 or len(set(int(value) for value in foreground)) != 1:
+                        raise ValueError("every pattern cell must contain one neutral shape")
+                    view = result[r0:r1, c0:c1]
+                    view[view != background] = key_colors[column]
+        else:
+            key_column = key_columns[0]
+            key_colors = [int(foregrounds[row][key_column][0]) for row in range(len(row_spans))]
+            for row, (r0, r1) in enumerate(row_spans):
+                for column, (c0, c1) in enumerate(column_spans):
+                    if column == key_column:
+                        continue
+                    foreground = foregrounds[row][column]
+                    if len(foreground) < 2 or len(set(int(value) for value in foreground)) != 1:
+                        raise ValueError("every pattern cell must contain one neutral shape")
+                    view = result[r0:r1, c0:c1]
+                    view[view != background] = key_colors[row]
+        return result
+
+    return _decorate(transform, "grid_key_pattern_recolor")
+
+
+def grid_stamp_by_row_key() -> Transform:
+    """Broadcast one template mask to every cell using one 2x2 key per row."""
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        _, row_spans, column_spans = _partition_grid_cells(source)
+        cells = [
+            [source[r0:r1, c0:c1] for c0, c1 in column_spans]
+            for r0, r1 in row_spans
+        ]
+        values = np.concatenate([cell.ravel() for row in cells for cell in row])
+        background = Counter(int(value) for value in values).most_common(1)[0][0]
+
+        keys: dict[tuple[int, int], int] = {}
+        templates: list[np.ndarray] = []
+        for row, cell_row in enumerate(cells):
+            for column, cell in enumerate(cell_row):
+                points = np.argwhere(cell != background)
+                if not len(points):
+                    continue
+                colors = set(int(value) for value in cell[cell != background])
+                if len(colors) != 1:
+                    raise ValueError("cell content must be monochrome")
+                if (
+                    len(points) == 4
+                    and int(points[:, 0].max() - points[:, 0].min()) == 1
+                    and int(points[:, 1].max() - points[:, 1].min()) == 1
+                ):
+                    keys[(row, column)] = next(iter(colors))
+                else:
+                    templates.append(cell != background)
+        if len(templates) != 1:
+            raise ValueError("exactly one non-key template is required")
+        template = templates[0]
+        row_colors: list[int] = []
+        for row in range(len(row_spans)):
+            colors = [color for (key_row, _), color in keys.items() if key_row == row]
+            if len(colors) != 1:
+                raise ValueError("every grid row must have exactly one color key")
+            row_colors.append(colors[0])
+
+        result = source.copy()
+        for row, (r0, r1) in enumerate(row_spans):
+            for c0, c1 in column_spans:
+                view = result[r0:r1, c0:c1]
+                view[:] = background
+                view[template] = row_colors[row]
+        return result
+
+    return _decorate(transform, "grid_stamp_by_row_key")
+
+
+def grid_fill_from_max_pattern() -> Transform:
+    """Fill every cell to the largest observed cell mask using divider color."""
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        divider, row_spans, column_spans = _partition_grid_cells(source)
+        cells = [
+            [source[r0:r1, c0:c1] for c0, c1 in column_spans]
+            for r0, r1 in row_spans
+        ]
+        values = np.concatenate([cell.ravel() for row in cells for cell in row])
+        background = Counter(int(value) for value in values).most_common(1)[0][0]
+        masks = [cell != background for row in cells for cell in row]
+        maximum = max(int(mask.sum()) for mask in masks)
+        if maximum == 0:
+            raise ValueError("template pattern is absent")
+        maximal = [mask for mask in masks if int(mask.sum()) == maximum]
+        unique: list[np.ndarray] = []
+        for mask in maximal:
+            if not any(np.array_equal(mask, item) for item in unique):
+                unique.append(mask)
+        if len(unique) != 1:
+            raise ValueError("largest cell pattern is ambiguous")
+        template = unique[0]
+        if any(np.any(mask & ~template) for mask in masks):
+            raise ValueError("a cell pattern is not a subset of the template")
+
+        result = source.copy()
+        for r0, r1 in row_spans:
+            for c0, c1 in column_spans:
+                view = result[r0:r1, c0:c1]
+                view[template & (view == background)] = divider
+        return result
+
+    return _decorate(transform, "grid_fill_from_max_pattern")
+
+
+def grid_complete_cell_multiset() -> Transform:
+    """Replace divider placeholders so every cell has one shared color multiset."""
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        divider, row_spans, column_spans = _partition_grid_cells(source)
+        cells = [
+            source[r0:r1, c0:c1]
+            for r0, r1 in row_spans
+            for c0, c1 in column_spans
+        ]
+        cell_count = len(cells)
+        area = int(cells[0].size)
+        totals = Counter(
+            int(value)
+            for cell in cells
+            for value in cell.flat
+            if int(value) != divider
+        )
+        target = Counter({
+            color: (count + cell_count - 1) // cell_count
+            for color, count in totals.items()
+        })
+        if sum(target.values()) != area:
+            raise ValueError("shared cell multiset cannot be inferred uniquely")
+
+        result = source.copy()
+        for r0, r1 in row_spans:
+            for c0, c1 in column_spans:
+                source_cell = source[r0:r1, c0:c1]
+                present = Counter(int(value) for value in source_cell.flat if int(value) != divider)
+                if any(present[color] > target[color] for color in present):
+                    raise ValueError("cell exceeds the inferred multiset")
+                missing: list[int] = []
+                for color in sorted(target):
+                    missing.extend([color] * (target[color] - present[color]))
+                placeholders = [
+                    tuple(int(value) for value in point)
+                    for point in np.argwhere(source_cell == divider)
+                ]
+                if len(missing) != len(placeholders):
+                    raise ValueError("placeholder count does not match cell deficit")
+                if len(set(missing)) > 1:
+                    raise ValueError("multiple missing colors make placement ambiguous")
+                view = result[r0:r1, c0:c1]
+                for cell, color in zip(placeholders, missing):
+                    view[cell] = color
+        return result
+
+    return _decorate(transform, "grid_complete_cell_multiset")
+
+
+def extract_unique_nonuniform_grid_cell() -> Transform:
+    """Return the sole non-uniform cell from an otherwise uniform grid."""
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        _, row_spans, column_spans = _partition_grid_cells(source)
+        candidates = [
+            source[r0:r1, c0:c1]
+            for r0, r1 in row_spans
+            for c0, c1 in column_spans
+            if len(np.unique(source[r0:r1, c0:c1])) > 1
+        ]
+        if len(candidates) != 1:
+            raise ValueError("non-uniform grid cell is absent or ambiguous")
+        return candidates[0].copy()
+
+    return _decorate(transform, "extract_unique_nonuniform_grid_cell")
