@@ -1239,6 +1239,65 @@ class PixelExpansionProposer(Proposer):
         return _deduplicate(candidates)
 
 
+class MiscTransformProposer(Proposer):
+    """Try compact same-size gravity, marker-connection, and shift rules."""
+
+    tier = 1
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+        if any(source.grid.shape != target.grid.shape for source, target in zip(inputs, outputs)):
+            return []
+
+        candidates: list[Hypothesis] = []
+
+        for direction in ("down", "up", "left", "right"):
+            transform = dsl.gravity(direction)
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(
+                    transform,
+                    f"pack foreground pixels toward the {direction} edge",
+                    0.84,
+                    2,
+                    "gravity",
+                ))
+
+        for mode, label in (
+            ("horizontal", "horizontally"),
+            ("vertical", "vertically"),
+            ("horizontal_vertical", "horizontally then vertically"),
+        ):
+            transform = dsl.connect_same_color(mode)
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(
+                    transform,
+                    f"connect matching color markers {label}",
+                    0.83,
+                    2 if mode != "horizontal_vertical" else 3,
+                    "same-color-connect",
+                ))
+
+        for axis in ("row", "column"):
+            for shift in (1, -1, 2, -2):
+                transform = dsl.diagonal_shift(axis, shift)
+                if _exact(transform, inputs, outputs):
+                    candidates.append(Hypothesis(
+                        transform,
+                        f"circularly shift each {axis} by {shift} times its index",
+                        0.82,
+                        2,
+                        "diagonal-shift",
+                    ))
+
+        return _deduplicate(candidates)
+
+
 class GridCellOperationProposer(Proposer):
     """Apply structural operations to cells separated by uniform H+V dividers."""
 
@@ -1328,5 +1387,6 @@ def default_proposers() -> list[Proposer]:
         FillFromBackgroundProposer(),
         FixedSmallOutputProposer(),
         PixelExpansionProposer(),
+        MiscTransformProposer(),
         GridCellOperationProposer(),
     ]

@@ -20,6 +20,7 @@ from arc2.proposers import (
     GeometricProposer,
     LargestComponentProposer,
     MarkerFrameProposer,
+    MiscTransformProposer,
     NestedRectangleProposer,
     FramedObjectProposer,
     PartitionAnchorRelocateProposer,
@@ -646,6 +647,45 @@ class DSLTests(unittest.TestCase):
             expected_blocks,
         )
 
+    def test_misc_transform_primitives(self) -> None:
+        gravity_source = np.array([
+            [0, 2, 0],
+            [3, 0, 4],
+            [0, 5, 0],
+        ])
+        gravity_expected = np.array([
+            [0, 0, 0],
+            [0, 2, 0],
+            [3, 5, 4],
+        ])
+        np.testing.assert_array_equal(
+            dsl.gravity("down")(gravity_source),
+            gravity_expected,
+        )
+
+        markers = np.array([
+            [2, 0, 0, 2],
+            [0, 3, 0, 0],
+            [0, 0, 0, 0],
+            [0, 3, 0, 0],
+        ])
+        connected = np.array([
+            [2, 2, 2, 2],
+            [0, 3, 0, 0],
+            [0, 3, 0, 0],
+            [0, 3, 0, 0],
+        ])
+        np.testing.assert_array_equal(
+            dsl.connect_same_color("horizontal_vertical")(markers),
+            connected,
+        )
+
+        shifted = np.array([[4, 8, 4, 8], [8, 4, 8, 4]])
+        np.testing.assert_array_equal(
+            dsl.diagonal_shift("column", 1)(np.array([[4] * 4, [8] * 4])),
+            shifted,
+        )
+
 
 class ProposerTests(unittest.TestCase):
     @staticmethod
@@ -791,6 +831,7 @@ class ProposerTests(unittest.TestCase):
         self.assertTrue(any(isinstance(p, FillFromBackgroundProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, FixedSmallOutputProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, PixelExpansionProposer) for p in defaults))
+        self.assertTrue(any(isinstance(p, MiscTransformProposer) for p in defaults))
         self.assertTrue(any(isinstance(p, GridCellOperationProposer) for p in defaults))
 
     def test_pixel_expansion_proposer_adapts_nonzero_key_color(self) -> None:

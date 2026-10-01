@@ -195,10 +195,6 @@ def should_skip_proposer(proposer: Proposer, sig: TaskSignature) -> bool:
     ) and sig.all_different_size:
         return True
 
-    # PixelExpansionProposer: skip same-size tasks (needs integer scaling)
-    if name == "PixelExpansionProposer" and sig.all_same_size:
-        return True
-
     # MiscTransformProposer: skip different-size tasks (all strategies are same-size)
     if name == "MiscTransformProposer" and sig.all_different_size:
         return True

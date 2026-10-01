@@ -704,6 +704,122 @@ def color_block_substitute(
     return _decorate(transform, "color_block_substitute", tuple(normalized))
 
 
+def gravity(direction: str, background: int | None = None) -> Transform:
+    """Pack foreground pixels against one grid edge, preserving line order."""
+
+    directions = {"down", "up", "left", "right"}
+    if direction not in directions:
+        raise ValueError(f"direction must be one of {sorted(directions)}")
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = (
+            Counter(int(value) for value in source.flat).most_common(1)[0][0]
+            if background is None
+            else background
+        )
+        result = np.full(source.shape, bg, dtype=int)
+        if direction in ("down", "up"):
+            for column in range(source.shape[1]):
+                values = source[:, column]
+                foreground = values[values != bg]
+                if direction == "up":
+                    result[:len(foreground), column] = foreground
+                elif len(foreground):
+                    result[-len(foreground):, column] = foreground
+        else:
+            for row in range(source.shape[0]):
+                values = source[row, :]
+                foreground = values[values != bg]
+                if direction == "left":
+                    result[row, :len(foreground)] = foreground
+                elif len(foreground):
+                    result[row, -len(foreground):] = foreground
+        return result
+
+    return _decorate(transform, "gravity", direction, background)
+
+
+def connect_same_color(
+    mode: str,
+    background: int | None = None,
+) -> Transform:
+    """Connect same-color row/column markers without overwriting foreground."""
+
+    modes = {"horizontal", "vertical", "horizontal_vertical"}
+    if mode not in modes:
+        raise ValueError(f"mode must be one of {sorted(modes)}")
+    if background is not None and background not in range(10):
+        raise ValueError("background color must be in [0, 9]")
+
+    def connect_axis(
+        markers: np.ndarray,
+        result: np.ndarray,
+        bg: int,
+        axis: int,
+    ) -> None:
+        line_count = markers.shape[0] if axis == 1 else markers.shape[1]
+        for line_index in range(line_count):
+            marker_line = (
+                markers[line_index, :]
+                if axis == 1
+                else markers[:, line_index]
+            )
+            output_line = (
+                result[line_index, :]
+                if axis == 1
+                else result[:, line_index]
+            )
+            colors = sorted(set(int(value) for value in marker_line) - {bg})
+            for color in colors:
+                positions = np.flatnonzero(marker_line == color)
+                if len(positions) < 2:
+                    continue
+                start, stop = int(positions[0]), int(positions[-1])
+                segment = output_line[start:stop + 1]
+                segment[segment == bg] = color
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        bg = (
+            Counter(int(value) for value in source.flat).most_common(1)[0][0]
+            if background is None
+            else background
+        )
+        result = source.copy()
+        if mode in ("horizontal", "horizontal_vertical"):
+            connect_axis(source, result, bg, 1)
+        if mode in ("vertical", "horizontal_vertical"):
+            connect_axis(source, result, bg, 0)
+        return result
+
+    return _decorate(transform, "connect_same_color", mode, background)
+
+
+def diagonal_shift(axis: str, shift: int) -> Transform:
+    """Circularly shift each row or column by its index times ``shift``."""
+
+    if axis not in {"row", "column"}:
+        raise ValueError("axis must be 'row' or 'column'")
+    if shift == 0:
+        raise ValueError("shift must be non-zero")
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = _grid(grid)
+        result = np.empty_like(source)
+        if axis == "row":
+            for row in range(source.shape[0]):
+                result[row, :] = np.roll(source[row, :], shift * row)
+        else:
+            for column in range(source.shape[1]):
+                result[:, column] = np.roll(source[:, column], shift * column)
+        return result
+
+    return _decorate(transform, "diagonal_shift", axis, shift)
+
+
 def block_analogy(background: int | None = None) -> Transform:
     """Apply each demonstrated A-to-B block rule to its neighboring C block.
 
