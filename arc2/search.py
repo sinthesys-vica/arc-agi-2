@@ -183,6 +183,14 @@ def should_skip_proposer(proposer: Proposer, sig: TaskSignature) -> bool:
             if sig.all_different_size:
                 return True
 
+    # Same-size repair families: skip when sizes differ
+    if name in (
+        "WallpaperRepairProposer",
+        "SymmetryCompleterProposer",
+        "ShapeUnifierProposer",
+    ) and sig.all_different_size:
+        return True
+
     return False
 
 
