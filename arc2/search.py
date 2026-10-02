@@ -199,6 +199,10 @@ def should_skip_proposer(proposer: Proposer, sig: TaskSignature) -> bool:
     if name == "MiscTransformProposer" and sig.all_different_size:
         return True
 
+    # NeighborColorProposer: local recoloring preserves the canvas size.
+    if name == "NeighborColorProposer" and sig.all_different_size:
+        return True
+
     return False
 
 

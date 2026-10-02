@@ -9,9 +9,11 @@ for accepting only exact fits across every training pair.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 
 import numpy as np
+from scipy import ndimage
 
 from . import dsl
 from .dsl import Transform
@@ -124,6 +126,91 @@ def _infer_color_block_mapping(
                 return None
             mapping[color] = block.copy()
     return mapping
+
+
+def _neighbor_kernel(connectivity: int) -> np.ndarray:
+    """Return the foreground-neighbor kernel for 4- or 8-connectivity."""
+
+    if connectivity == 4:
+        return np.asarray(
+            ((0, 1, 0), (1, 0, 1), (0, 1, 0)),
+            dtype=int,
+        )
+    if connectivity == 8:
+        return np.asarray(
+            ((1, 1, 1), (1, 0, 1), (1, 1, 1)),
+            dtype=int,
+        )
+    raise ValueError("connectivity must be 4 or 8")
+
+
+def _foreground_neighbor_counts(grid: np.ndarray, connectivity: int) -> np.ndarray:
+    """Count non-background neighbors around every cell in ``grid``."""
+
+    source = np.asarray(grid, dtype=int)
+    background = Counter(
+        int(value) for value in source.flat
+    ).most_common(1)[0][0]
+    foreground = (source != background).astype(int)
+    return ndimage.convolve(
+        foreground,
+        _neighbor_kernel(connectivity),
+        mode="constant",
+        cval=0,
+    )
+
+
+def _infer_neighbor_color_mapping(
+    inputs: list[Scene],
+    outputs: list[Scene],
+    connectivity: int,
+) -> dict[tuple[int, int], int] | None:
+    """Infer one joint color/count mapping across every training pair."""
+
+    mapping: dict[tuple[int, int], int] = {}
+    changed = False
+    for source, target in zip(inputs, outputs):
+        if source.grid.shape != target.grid.shape:
+            return None
+        counts = _foreground_neighbor_counts(source.grid, connectivity)
+        for old, count, new in zip(source.grid.flat, counts.flat, target.grid.flat):
+            key = (int(old), int(count))
+            value = int(new)
+            previous = mapping.setdefault(key, value)
+            if previous != value:
+                return None
+            changed = changed or int(old) != value
+    return mapping if mapping and changed else None
+
+
+def _neighbor_color_transform(
+    mapping: dict[tuple[int, int], int],
+    connectivity: int,
+) -> Transform:
+    """Build a stable transform from a learned neighbor-color mapping."""
+
+    frozen_mapping = tuple(
+        (color, count, output)
+        for (color, count), output in sorted(mapping.items())
+    )
+
+    def transform(grid: np.ndarray) -> np.ndarray:
+        source = np.asarray(grid, dtype=int)
+        counts = _foreground_neighbor_counts(source, connectivity)
+        result = source.copy()
+        for index in np.ndindex(source.shape):
+            key = (int(source[index]), int(counts[index]))
+            result[index] = mapping.get(key, int(source[index]))
+        return result
+
+    transform.__name__ = "neighbor_color_recolor"
+    transform.__qualname__ = "neighbor_color_recolor"
+    transform._arc2_signature = (  # type: ignore[attr-defined]
+        "neighbor_color_recolor",
+        connectivity,
+        frozen_mapping,
+    )
+    return transform
 
 
 class GeometricProposer(Proposer):
@@ -1401,6 +1488,42 @@ class OverlayFillProposer(Proposer):
         return _deduplicate(candidates)
 
 
+class NeighborColorProposer(Proposer):
+    """Recolor cells by input color and local foreground-neighbor count."""
+
+    tier = 1
+
+    def propose(
+        self,
+        inputs: list[Scene],
+        outputs: list[Scene] | None = None,
+    ) -> list[Hypothesis]:
+        if not _paired(inputs, outputs):
+            return []
+        assert outputs is not None
+        if any(
+            source.grid.shape != target.grid.shape
+            for source, target in zip(inputs, outputs)
+        ):
+            return []
+
+        candidates: list[Hypothesis] = []
+        for connectivity in (4, 8):
+            mapping = _infer_neighbor_color_mapping(inputs, outputs, connectivity)
+            if mapping is None:
+                continue
+            transform = _neighbor_color_transform(mapping, connectivity)
+            if _exact(transform, inputs, outputs):
+                candidates.append(Hypothesis(
+                    transform,
+                    f"recolor by {connectivity}-neighbor foreground count",
+                    0.84,
+                    3,
+                    "neighbor-color",
+                ))
+        return _deduplicate(candidates)
+
+
 class GridCellOperationProposer(Proposer):
     """Apply structural operations to cells separated by uniform H+V dividers."""
 
@@ -1493,5 +1616,6 @@ def default_proposers() -> list[Proposer]:
         MiscTransformProposer(),
         ComponentBBoxProposer(),
         OverlayFillProposer(),
+        NeighborColorProposer(),
         GridCellOperationProposer(),
     ]
